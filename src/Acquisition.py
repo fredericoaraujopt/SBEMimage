@@ -20,6 +20,8 @@ import shutil
 import datetime
 import json
 import math
+import cv2
+import numpy as np
 
 from time import sleep, time
 from statistics import mean
@@ -30,6 +32,13 @@ from qtpy.QtWidgets import QMessageBox
 from constants import Error, Errors
 import constants
 import utils
+from acq_guardrails import (
+    compute_magnification,
+    guardrail_for_grid_params,
+    now_timestamp,
+    ov_diagnostics_payload,
+    stage_delta,
+)
 
 
 class Acquisition:
@@ -1563,6 +1572,9 @@ class Acquisition:
                 'STAGE',
                 f'Moving to OV {ov_index} position.')
             self.stage.move_to_xy(ov_stage_position)
+            if self.stage.error_state == Error.none:
+                move_success = self._validate_stage_arrival(
+                    ov_stage_position, label=f'OV {ov_index}')
             if self.stage.error_state != Error.none:
                 self.log(
                     'STAGE',
@@ -1577,6 +1589,9 @@ class Acquisition:
                 self.stage.reset_error_state()
                 sleep(2)
                 self.stage.move_to_xy(ov_stage_position)
+                if self.stage.error_state == Error.none:
+                    move_success = self._validate_stage_arrival(
+                        ov_stage_position, label=f'OV {ov_index}')
                 self.error_state = self.stage.error_state
                 if self.error_state != Error.none:
                     self.log(
@@ -1620,6 +1635,7 @@ class Acquisition:
                 'Acquiring OV at '
                 f'X:{ov_stage_position[0]:.3f}, '
                 f'Y:{ov_stage_position[1]:.3f}')
+            self._log_ov_diagnostics(ov_index, prefix=f'OV {ov_index} diagnostics')
 
             # Indicate the overview being acquired in the viewport
             self.main_controls_trigger.transmit('ACQ IND OV', ov_index)
@@ -1658,10 +1674,21 @@ class Acquisition:
                 if load_error:
                     self.error_state = Error.image_load
                     ov_accepted = False
+                    self.log(
+                        'SEM',
+                        f'OV {ov_index}: image load failed ({load_exception}).',
+                        'error')
                     # Don't pause yet, try again in OV acquisition loop.
                 elif grab_incomplete and check_ov_acceptance:
                     self.error_state = Error.grab_incomplete
                     ov_accepted = False
+                    shape_str = 'unknown'
+                    if ov_img is not None:
+                        shape_str = str(list(ov_img.shape))
+                    self.log(
+                        'SEM',
+                        f'OV {ov_index}: grab incomplete (loaded shape {shape_str}).',
+                        'error')
                     # Don't pause yet, try again in OV acquisition loop.
                 elif self.monitor_images and not range_test_passed and check_ov_acceptance:
                     ov_accepted = False
@@ -1715,7 +1742,7 @@ class Acquisition:
                                 ov_accepted = (self.user_reply == 1)
                                 if self.user_reply == 2:
                                     self.pause_acquisition(1)
-                                self.user_reply = None
+                        self.user_reply = None
             else:
                 self.log(
                     'SEM',
@@ -1724,6 +1751,12 @@ class Acquisition:
                 self.error_state = Error.grab_image
                 self.pause_acquisition(1)
                 ov_accepted = False
+
+        if ov_accepted:
+            self.ovm[ov_index].mark_acquired('success', now_timestamp())
+        else:
+            self.ovm[ov_index].last_acquisition_result = 'failed'
+            self.ovm[ov_index].last_acquisition_timestamp = now_timestamp()
 
         # Check for "Ask User" override
         if self.ask_user_mode and self.error_state in [Error.grab_incomplete, Error.overview_image]:
@@ -1937,6 +1970,20 @@ class Acquisition:
         self.log(
             'CTRL',
             msg)
+        grid.last_acquisition_result = 'running'
+        grid.last_acquisition_timestamp = now_timestamp()
+        guardrail = self._check_grid_guardrails(grid_index)
+        strict_guardrails = utils.str_to_bool(
+            self.cfg['acq'].get('guardrail_strict', 'False'))
+        if (not guardrail.ok) and strict_guardrails:
+            self.pause_acquisition(1)
+            self.error_state = Error.magnification
+            grid.mark_not_acquired('guardrail_blocked', now_timestamp())
+            self.log(
+                'CTRL',
+                f'Guardrail blocked acquisition of {grid_label}: {guardrail.message}',
+                'error')
+            return
 
         if self.gm.array_mode:
             # for array mode WD/stig is set in acquire_tile()
@@ -1980,6 +2027,8 @@ class Acquisition:
         self.set_scan_rotation(grid_index)
 
         # ============= Acquisition loop of all active tiles ===============
+        prev_tile_img = None
+        prev_tile_stage = None
         for tile_index in active_tiles:
             fail_counter = 0
             tile_accepted = False
@@ -2047,9 +2096,25 @@ class Acquisition:
                 and tile_selected
                 and not tile_skipped
             ):
+                stage_xy = tuple(grid[tile_index].sx_sy)
+                if prev_tile_stage is not None:
+                    expected_shift_um = math.hypot(
+                        stage_xy[0] - prev_tile_stage[0],
+                        stage_xy[1] - prev_tile_stage[1])
+                    expected_shift_px = expected_shift_um * 1000 / grid.pixel_size
+                    if not self._motion_sanity_check(
+                        prev_tile_img, tile_img, expected_shift_px, f'Tile {tile_id}'
+                    ):
+                        self.pause_acquisition(1)
+                        self.set_interruption_point(grid_index, tile_index)
+                        break
                 # Write tile's name and position into imagelist
                 self.register_accepted_tile(relative_save_path,
                                             grid_index, tile_index)
+                grid[tile_index].acquired_sx_sy = np.array(stage_xy)
+                grid.mark_acquired('success', now_timestamp())
+                prev_tile_img = tile_img
+                prev_tile_stage = stage_xy
                 # Save stats and reslice
                 success, error_msg = self.img_inspector.save_tile_stats(
                     self.base_dir, grid_index, tile_index,
@@ -2081,7 +2146,6 @@ class Acquisition:
                     self.autofocus.prepare_tile_for_heuristic_af(
                         tile_img, tile_key)
                     self.heuristic_af_queue.append(tile_key)
-                    del tile_img
 
             elif (
                 not tile_selected
@@ -2146,6 +2210,7 @@ class Acquisition:
             self.grids_acquired.append(grid_index)
             # Empty the tile list since all tiles were acquired
             self.tiles_acquired = []
+            grid.mark_acquired('success', now_timestamp())
 
             if self.gm.array_mode:
                 self.cs.vp_centre_dx_dy = grid.centre_dx_dy
@@ -2154,6 +2219,8 @@ class Acquisition:
                     'ARRAY SET SECTION STATE',
                     'acquired',
                     [grid_index])
+        else:
+            grid.mark_not_acquired('failed', now_timestamp())
 
     def acquire_tile(self, grid_index, tile_index,
                      adjust_wd_stig=False, adjust_acq_settings=False,
@@ -2230,6 +2297,9 @@ class Acquisition:
                     'STAGE',
                     f'Moving to position of Tile {tile_label}')
                 self.stage.move_to_xy((stage_x, stage_y))
+                if self.stage.error_state == Error.none:
+                    self._validate_stage_arrival(
+                        (stage_x, stage_y), label=f'Tile {tile_label}')
                 # The move function waits for the motor move duration and the
                 # specified stage move wait interval.
                 # Check if there were microtome problems:
@@ -2250,6 +2320,9 @@ class Acquisition:
                         'STAGE',
                         f'Moving to position of Tile {tile_label}')
                     self.stage.move_to_xy((stage_x, stage_y))
+                    if self.stage.error_state == Error.none:
+                        self._validate_stage_arrival(
+                            (stage_x, stage_y), label=f'Tile {tile_label}')
                     # Check again if there is an error
                     self.error_state = self.stage.error_state
                     self.stage.reset_error_state()
@@ -2531,6 +2604,8 @@ class Acquisition:
         if self.use_mirror_drive:
             self.mirror_imagelist_file.write(tileinfo_str)
         self.tiles_acquired.append(tile_index)
+        self.gm[grid_index][tile_index].acquired_sx_sy = np.array(
+            self.gm[grid_index][tile_index].sx_sy)
         tile_width, tile_height = grid.frame_size
         tile_metadata = {
             'tileid': tile_id,
@@ -2574,6 +2649,7 @@ class Acquisition:
         # Write the same information to the ov_imagelist on the mirror drive
         if self.use_mirror_drive:
             self.mirror_imagelist_ov_file.write(overviewinfo_str)
+        self.ovm[ov_index].mark_acquired('success', now_timestamp())
         ov_width, ov_height = self.ovm[ov_index].frame_size
         ov_metadata = {
             'ov_id': ov_id,
@@ -3032,6 +3108,89 @@ class Acquisition:
                 'SEM',
                 'Restored previous magnification.')
             self.main_controls_trigger.transmit('MAG ALERT')
+
+    def _log_ov_diagnostics(self, ov_index, prefix='OV diagnostics'):
+        ov = self.ovm[ov_index]
+        payload = ov_diagnostics_payload(self.sem, ov)
+        sem_frame = payload.get('sem_frame', None)
+        frame_str = str(payload['requested_frame'])
+        sem_frame_str = str(sem_frame) if sem_frame is not None else 'unknown'
+        self.log(
+            'SEM',
+            f"{prefix}: req_frame={frame_str}, sem_frame={sem_frame_str}, "
+            f"px={payload['requested_pixel_size_nm']:.2f} nm, "
+            f"mag={payload['requested_mag']:.1f}x, "
+            f"dwell={payload['dwell_us']:.3f} us, "
+            f"bit_depth_sel={payload['bit_depth_selector']}")
+
+    def _validate_stage_arrival(self, commanded_xy, label='target'):
+        """Verify that the reported stage position matches the commanded move."""
+        try:
+            actual_xy = self.stage.get_xy()
+        except Exception:
+            return True
+        dx, dy = stage_delta(commanded_xy, actual_xy)
+        abs_dx, abs_dy = abs(dx), abs(dy)
+        tolerance = max(float(getattr(self.stage, 'xy_tolerance', 0.0)), 0.5)
+        if abs_dx > tolerance or abs_dy > tolerance:
+            self.error_state = Error.stage_xy
+            self.stage.error_state = Error.stage_xy
+            self.log(
+                'STAGE',
+                f'Observed stage mismatch after move to {label}: '
+                f'commanded=({commanded_xy[0]:.3f}, {commanded_xy[1]:.3f}), '
+                f'actual=({actual_xy[0]:.3f}, {actual_xy[1]:.3f}), '
+                f'delta=({dx:.3f}, {dy:.3f}) um, tol={tolerance:.3f} um.',
+                'error')
+            return False
+        return True
+
+    def _motion_sanity_check(self, previous_img, current_img, expected_shift_px, tile_label):
+        """Compare expected inter-tile shift against observed image displacement."""
+        if previous_img is None or current_img is None:
+            return True
+        if expected_shift_px < 5:
+            return True
+        prev_std = float(np.std(previous_img))
+        curr_std = float(np.std(current_img))
+        if prev_std < 2 or curr_std < 2:
+            # Uniform tiles are unreliable for correlation-based shift checks.
+            return True
+        try:
+            prev32 = previous_img.astype(np.float32)
+            curr32 = current_img.astype(np.float32)
+            shift, _ = cv2.phaseCorrelate(prev32, curr32)
+            observed_shift_px = float(math.hypot(shift[0], shift[1]))
+        except Exception as e:
+            self.log('CTRL', f'Warning: motion sanity check skipped ({e}).', 'warning')
+            return True
+
+        min_ratio = 0.15
+        if observed_shift_px < expected_shift_px * min_ratio:
+            self.error_state = Error.stage_xy
+            self.log(
+                'CTRL',
+                f'{tile_label}: expected image shift ~{expected_shift_px:.1f} px, '
+                f'observed {observed_shift_px:.1f} px. Motion sanity check failed.',
+                'error')
+            self.add_to_incident_log(
+                f'WARNING (Motion sanity failed at {tile_label}: '
+                f'exp {expected_shift_px:.1f}px vs obs {observed_shift_px:.1f}px)')
+            return False
+        return True
+
+    def _check_grid_guardrails(self, grid_index):
+        grid = self.gm[grid_index]
+        result = guardrail_for_grid_params(
+            self.sem,
+            grid.frame_size,
+            grid.pixel_size,
+            min_mag=float(self.cfg['acq'].get('guardrail_min_mag', 60)),
+            max_mag=float(self.cfg['acq'].get('guardrail_max_mag', 25000)),
+        )
+        if not result.ok:
+            self.log('CTRL', f'Guardrail: {result.message}', 'warning')
+        return result
 
     def reset_acquisition(self):
         self.slice_counter = 0

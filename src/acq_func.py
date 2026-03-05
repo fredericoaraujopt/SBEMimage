@@ -18,6 +18,7 @@ and not during acquisitions:
 
 import os
 import datetime
+import cv2
 import numpy as np
 from time import sleep
 
@@ -25,6 +26,113 @@ import constants
 from constants import Error
 from image_io import imwrite
 import utils
+from acq_guardrails import (
+    now_timestamp,
+    ov_diagnostics_payload,
+    recommended_ov_tile_factor,
+)
+
+
+def _log_ov_diagnostics(sem, ov, ov_index):
+    payload = ov_diagnostics_payload(sem, ov)
+    sem_frame = payload.get('sem_frame', None)
+    sem_frame_str = str(sem_frame) if sem_frame is not None else 'unknown'
+    utils.log_info(
+        'SEM',
+        f"OV {ov_index} diagnostics: req_frame={payload['requested_frame']}, "
+        f"sem_frame={sem_frame_str}, px={payload['requested_pixel_size_nm']:.2f} nm, "
+        f"mag={payload['requested_mag']:.1f}x, dwell={payload['dwell_us']:.3f} us, "
+        f"bit_depth_sel={payload['bit_depth_selector']}")
+
+
+def _mark_ov_result(ov, success):
+    ts = now_timestamp()
+    if success:
+        ov.mark_acquired('success', ts)
+    else:
+        ov.last_acquisition_result = 'failed'
+        ov.last_acquisition_timestamp = ts
+
+
+def _acquire_ov_tiled_fallback(base_dir, ov_index, sem, stage, ovm, img_inspector, ov_save_path):
+    """Fallback path for OV refresh when single-frame grabbing is unreliable."""
+    ov = ovm[ov_index]
+    min_single_frame_mag = float(
+        sem.cfg['overviews'].get('ov_single_frame_min_mag', 80))
+    tile_factor = recommended_ov_tile_factor(
+        sem,
+        ov.frame_size,
+        ov.pixel_size,
+        min_single_frame_mag=min_single_frame_mag)
+    tile_factor = int(np.clip(tile_factor, 2, 6))
+
+    width_px, height_px = ov.width_p(), ov.height_p()
+    stitched = None
+    tile_pixel_size = ov.pixel_size / tile_factor
+    tile_w_d = ov.width_d() / tile_factor
+    tile_h_d = ov.height_d() / tile_factor
+    centre_dx, centre_dy = ov.centre_dx_dy
+
+    sem.apply_frame_settings(
+        ov.frame_size_selector,
+        tile_pixel_size,
+        ov.dwell_time)
+    sem.set_bit_depth(ov.bit_depth_selector)
+
+    utils.log_info(
+        'SEM',
+        f'OV {ov_index}: falling back to tiled acquisition '
+        f'({tile_factor}x{tile_factor}, tile px {tile_pixel_size:.2f} nm).')
+
+    try:
+        for row in range(tile_factor):
+            for col in range(tile_factor):
+                offset_dx = (col + 0.5) * tile_w_d - ov.width_d() / 2
+                offset_dy = (row + 0.5) * tile_h_d - ov.height_d() / 2
+                target_sx_sy = ov.cs.convert_d_to_s((centre_dx + offset_dx, centre_dy + offset_dy))
+                stage.move_to_xy(target_sx_sy)
+                if stage.error_state != Error.none:
+                    stage.reset_error_state()
+                    return False
+
+                temp_path = os.path.join(
+                    base_dir,
+                    'workspace',
+                    f'ov{str(ov_index).zfill(constants.OV_DIGITS)}_tile_{row}_{col}{constants.TEMP_IMAGE_FORMAT}')
+                sem.acquire_frame(temp_path, stage)
+                tile_img, _, _, load_error, _, grab_incomplete = img_inspector.load_and_inspect(temp_path)
+                if load_error or grab_incomplete:
+                    sem.acquire_frame(temp_path, stage)
+                    tile_img, _, _, load_error, _, grab_incomplete = img_inspector.load_and_inspect(temp_path)
+                    if load_error or grab_incomplete:
+                        return False
+
+                if stitched is None:
+                    if tile_img.ndim == 2:
+                        stitched = np.zeros((height_px, width_px), dtype=tile_img.dtype)
+                    else:
+                        stitched = np.zeros((height_px, width_px, tile_img.shape[2]), dtype=tile_img.dtype)
+
+                x0 = int(round(col * width_px / tile_factor))
+                x1 = int(round((col + 1) * width_px / tile_factor))
+                y0 = int(round(row * height_px / tile_factor))
+                y1 = int(round((row + 1) * height_px / tile_factor))
+                target_w = max(1, x1 - x0)
+                target_h = max(1, y1 - y0)
+                resized = cv2.resize(tile_img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                stitched[y0:y1, x0:x1] = resized
+    finally:
+        # Restore original OV settings for next operation.
+        sem.apply_frame_settings(
+            ov.frame_size_selector,
+            ov.pixel_size,
+            ov.dwell_time)
+        sem.set_bit_depth(ov.bit_depth_selector)
+
+    if stitched is None:
+        return False
+    imwrite(ov_save_path, stitched)
+    return True
 
 
 def acquire_ov(base_dir, selection, sem, stage, ovm, img_inspector,
@@ -62,6 +170,17 @@ def acquire_ov(base_dir, selection, sem, stage, ovm, img_inspector,
                 success = False
         if success:
             # Update stage position in Main Controls GUI and Viewport
+            actual_xy = stage.get_xy()
+            tol = max(float(getattr(stage, 'xy_tolerance', 0.0)), 0.5)
+            dx = actual_xy[0] - ovm[ov_index].centre_sx_sy[0]
+            dy = actual_xy[1] - ovm[ov_index].centre_sx_sy[1]
+            if abs(dx) > tol or abs(dy) > tol:
+                success = False
+                utils.log_error(
+                    'STAGE',
+                    f'OV {ov_index}: stage mismatch after move. '
+                    f'delta=({dx:.3f}, {dy:.3f}) um, tol={tol:.3f} um.')
+                break
             main_controls_trigger.transmit('UPDATE XY')
             sleep(0.1)
             main_controls_trigger.transmit('DRAW VP')
@@ -79,6 +198,7 @@ def acquire_ov(base_dir, selection, sem, stage, ovm, img_inspector,
                                      ovm[ov_index].dwell_time)
             # Set bit depth
             sem.set_bit_depth(ovm[ov_index].bit_depth_selector)
+            _log_ov_diagnostics(sem, ovm[ov_index], ov_index)
             save_path = os.path.join(
                 base_dir, 'workspace',
                 utils.get_ov_filename(None, ov_index))
@@ -103,20 +223,26 @@ def acquire_ov(base_dir, selection, sem, stage, ovm, img_inspector,
                 _, _, _, load_error, _, grab_incomplete = (
                     img_inspector.load_and_inspect(save_path))
                 if load_error or grab_incomplete:
-                    success = False
-                    if load_error:
-                        cause = 'load error'
-                    elif grab_incomplete:
-                        cause = 'grab incomplete'
-                    else:
-                        cause = 'acquisition error'
-                    #main_controls_trigger.transmit(utils.format_log_entry(f'SEM: Second attempt to acquire OV {ov_index} failed ({cause}).'))
-                    utils.log_info('SEM', f'Second attempt to acquire OV {ov_index} failed ({cause}).')
+                    cause = 'load error' if load_error else 'grab incomplete'
+                    utils.log_info(
+                        'SEM',
+                        f'Second attempt to acquire OV {ov_index} failed ({cause}).')
+                    fallback_enabled = utils.str_to_bool(
+                        sem.cfg['overviews'].get('auto_tile_ov_fallback', 'True'))
+                    if fallback_enabled:
+                        success = _acquire_ov_tiled_fallback(
+                            base_dir, ov_index, sem, stage, ovm, img_inspector, save_path)
+                        if success:
+                            utils.log_info('SEM', f'OV {ov_index}: tiled fallback succeeded.')
+                    if not success:
+                        success = False
             if success:
                 ovm[ov_index].vp_file_path = save_path
+            _mark_ov_result(ovm[ov_index], success)
             # Show updated OV
             viewport_trigger.transmit('DRAW VP')
         if not success:
+            _mark_ov_result(ovm[ov_index], False)
             break # leave loop if error has occured
     if success:
         viewport_trigger.transmit('REFRESH OV SUCCESS')

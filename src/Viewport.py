@@ -39,6 +39,7 @@ from dialog.viewport.TemplateRotationDlg import TemplateRotationDlg
 from dialog.viewport.GridRotationDlg import GridRotationDlg
 from dialog.viewport.FocusGradientTileSelectionDlg import FocusGradientTileSelectionDlg
 from dialog.viewport.StubOVDlg import StubOVDlg
+from dialog.viewport.ov_queue_dlg import OVQueueDlg
 from dialog.MotorStatusDlg import MotorStatusDlg
 
 
@@ -103,6 +104,11 @@ class Viewport(QWidget):
         self.selected_grid, self.selected_tile = None, None
         self.selected_ov = None
         self.selected_imported = None
+        self.ov_queue_dlg = None
+        self.render_debug_enabled = utils.str_to_bool(
+            self.cfg['viewport'].get('render_debug', 'False'))
+        self.render_antialias = utils.str_to_bool(
+            self.cfg['viewport'].get('render_antialias', 'False'))
 
     def save_to_cfg(self):
         """Save viewport configuration to ConfigParser object."""
@@ -118,6 +124,8 @@ class Viewport(QWidget):
             self.show_native_res)
         self.cfg['viewport']['show_saturated_pixels'] = str(
             self.show_saturated_pixels)
+        self.cfg['viewport']['render_debug'] = str(self.render_debug_enabled)
+        self.cfg['viewport']['render_antialias'] = str(self.render_antialias)
 
         self.cfg['viewport']['sv_current_grid'] = str(self.sv_current_grid)
         self.cfg['viewport']['sv_current_tile'] = str(self.sv_current_tile)
@@ -141,6 +149,7 @@ class Viewport(QWidget):
             self.checkBox_showStagePos.setEnabled(False)
         # Detect if tab is changed
         self.tabWidget.currentChanged.connect(self.tab_changed)
+        self.QLabel_ViewportCanvas.setAttribute(Qt.WA_OpaquePaintEvent, True)
 
     def tab_changed(self):
         if self.tabWidget.currentIndex() == 2:  # Acquisition monitor
@@ -179,6 +188,7 @@ class Viewport(QWidget):
         self.vp_update_ov_selector()
         self.sv_update_ov_selector()
         self.m_update_ov_selector()
+        self._refresh_ov_queue()
 
     def _update_measure_buttons(self):
         """Display the measuring tool buttons as active or inactive."""
@@ -409,10 +419,17 @@ class Viewport(QWidget):
                 and self.vp_current_ov >= -2
                 and not self.busy):
                 if self.selected_ov is not None and self.selected_ov >= 0:
-                    self.ov_drag_active = True
-                    self.drag_origin = (px, py)
-                    self.stage_pos_backup = (
-                        self.ovm[self.selected_ov].centre_sx_sy)
+                    if self.ovm[self.selected_ov].locked:
+                        QMessageBox.information(
+                            self, 'Overview locked',
+                            f'OV {self.selected_ov} is acquired and locked.\n'
+                            'Unlock it from the context menu before moving.',
+                            QMessageBox.Ok)
+                    else:
+                        self.ov_drag_active = True
+                        self.drag_origin = (px, py)
+                        self.stage_pos_backup = (
+                            self.ovm[self.selected_ov].centre_sx_sy)
                 else:
                     # Draw OV
                     self.ov_draw_active = True
@@ -439,12 +456,20 @@ class Viewport(QWidget):
                 and self.vp_current_grid >= -2
                 and not self.busy):
                 if self.selected_grid is not None and self.selected_grid >= 0:
-                    self.grid_drag_active = True
-                    self.drag_origin = px, py
-                    self.drag_current = self.drag_origin
-                    # Save coordinates in case user wants to undo
-                    self.stage_pos_backup = (
-                        self.gm[self.selected_grid].origin_sx_sy)
+                    if self.gm[self.selected_grid].locked:
+                        QMessageBox.information(
+                            self, 'Grid locked',
+                            f'{self.gm.get_grid_label(self.selected_grid)} '
+                            'is acquired and locked.\nUnlock it from the '
+                            'context menu before moving.',
+                            QMessageBox.Ok)
+                    else:
+                        self.grid_drag_active = True
+                        self.drag_origin = px, py
+                        self.drag_current = self.drag_origin
+                        # Save coordinates in case user wants to undo
+                        self.stage_pos_backup = (
+                            self.gm[self.selected_grid].origin_sx_sy)
                 else:
                     # Draw grid
                     self.grid_draw_active = True
@@ -641,7 +666,15 @@ class Viewport(QWidget):
             px, py = p.x() - constants.VP_MARGIN_X, p.y() - constants.VP_MARGIN_Y
             if px in range(self.cs.vp_width) and py in range(self.cs.vp_height):
                 if self.tabWidget.currentIndex() == 0:
-                    self._vp_mouse_zoom(px, py, 2)
+                    self.selected_grid, self.selected_tile = (
+                        self._vp_grid_tile_mouse_selection(px, py))
+                    self.selected_ov = self._vp_ov_mouse_selection(px, py)
+                    if self.selected_grid is not None:
+                        self._vp_open_grid_settings()
+                    elif self.selected_ov is not None:
+                        self._vp_open_ov_settings()
+                    else:
+                        self._vp_mouse_zoom(px, py, 2)
                 elif self.tabWidget.currentIndex() == 1:
                     # Disable native resolution
                     self.sv_disable_native_resolution()
@@ -797,6 +830,7 @@ class Viewport(QWidget):
 
             # Update viewport
             self.vp_draw()
+            self._refresh_ov_queue()
             self.main_controls_trigger.transmit('SHOW CURRENT SETTINGS')
 
         elif event.button() == Qt.RightButton:
@@ -1060,6 +1094,122 @@ class Viewport(QWidget):
         self.main_controls_trigger.transmit('SHOW CURRENT SETTINGS')
         self.vp_draw()
 
+    def _refresh_ov_queue(self):
+        if self.ov_queue_dlg is not None and self.ov_queue_dlg.isVisible():
+            self.ov_queue_dlg.refresh_table()
+
+    def vp_open_ov_queue_panel(self):
+        if self.ov_queue_dlg is None:
+            self.ov_queue_dlg = OVQueueDlg(self.ovm, self)
+        self.ov_queue_dlg.show()
+        self.ov_queue_dlg.raise_()
+        self.ov_queue_dlg.activateWindow()
+        self.ov_queue_dlg.refresh_table()
+
+    def _vp_open_ov_settings(self):
+        ov_index = self.selected_ov if self.selected_ov is not None else 0
+        self.main_controls_trigger.transmit('OPEN OV SETTINGS', ov_index)
+
+    def _vp_toggle_grid_lock(self, grid_index):
+        grid = self.gm[grid_index]
+        if grid.locked:
+            user_reply = QMessageBox.question(
+                self, 'Unlock acquired grid',
+                f'{grid.get_label(grid_index)} is locked because it was acquired.\n\n'
+                'Unlocking allows moving it, which may break spatial provenance.\n'
+                'Proceed with unlock?',
+                QMessageBox.Ok | QMessageBox.Cancel)
+            if user_reply != QMessageBox.Ok:
+                return
+            grid.locked = False
+            self._add_to_main_log(
+                f'CTRL: {grid.get_label(grid_index)} unlocked by operator.')
+        else:
+            grid.locked = True
+            self._add_to_main_log(
+                f'CTRL: {grid.get_label(grid_index)} locked.')
+        self.vp_draw()
+
+    def _vp_toggle_ov_lock(self, ov_index):
+        ov = self.ovm[ov_index]
+        if ov.locked:
+            user_reply = QMessageBox.question(
+                self, 'Unlock acquired overview',
+                f'OV {ov_index} is locked because it was acquired.\n\n'
+                'Unlocking allows moving it, which may break spatial provenance.\n'
+                'Proceed with unlock?',
+                QMessageBox.Ok | QMessageBox.Cancel)
+            if user_reply != QMessageBox.Ok:
+                return
+            ov.locked = False
+            self._add_to_main_log(f'CTRL: OV {ov_index} unlocked by operator.')
+        else:
+            ov.locked = True
+            self._add_to_main_log(f'CTRL: OV {ov_index} locked.')
+        self.vp_draw()
+        self._refresh_ov_queue()
+
+    def _vp_clear_selected_ov_image(self):
+        if self.selected_ov is None:
+            return
+        self.ovm[self.selected_ov].vp_file_path = ''
+        self.ovm[self.selected_ov].mark_not_acquired(result='cleared')
+        self.vp_draw()
+        self._refresh_ov_queue()
+
+    def vp_registration_check(self):
+        """Quick geometry check between selected tile and selected/containing OV."""
+        if self.selected_grid is None or self.selected_tile is None:
+            QMessageBox.information(
+                self, 'Registration check',
+                'Select a tile first (right-click on a tile).',
+                QMessageBox.Ok)
+            return
+        grid = self.gm[self.selected_grid]
+        min_dx, max_dx, min_dy, max_dy = grid.tile_bounding_box(self.selected_tile)
+        tile_w = max_dx - min_dx
+        tile_h = max_dy - min_dy
+        candidate_ov = self.selected_ov
+        if candidate_ov is None:
+            for ov_index in range(self.ovm.number_ov):
+                ov_min_dx, ov_min_dy, ov_max_dx, ov_max_dy = self.ovm[ov_index].bounding_box()
+                if (min_dx >= ov_min_dx and max_dx <= ov_max_dx
+                        and min_dy >= ov_min_dy and max_dy <= ov_max_dy):
+                    candidate_ov = ov_index
+                    break
+        if candidate_ov is None:
+            QMessageBox.warning(
+                self, 'Registration check',
+                'Selected tile is outside all current OV footprints.',
+                QMessageBox.Ok)
+            return
+        ov = self.ovm[candidate_ov]
+        ov_min_dx, ov_min_dy, _, _ = ov.bounding_box()
+        px_left = int((min_dx - ov_min_dx) * 1000 / ov.pixel_size)
+        px_top = int((min_dy - ov_min_dy) * 1000 / ov.pixel_size)
+        px_w = int(tile_w * 1000 / ov.pixel_size)
+        px_h = int(tile_h * 1000 / ov.pixel_size)
+        calibration_note = ''
+        if not getattr(self.cs, 'calibration_found', True):
+            calibration_note = (
+                '\n\nWarning: stage calibration is missing for current EHT, '
+                'so OV/tile registration may be unreliable.')
+        QMessageBox.information(
+            self, 'OV/Grid registration check',
+            f'Grid {self.selected_grid} tile {self.selected_tile} expected footprint in '
+            f'OV {candidate_ov}:\n'
+            f'- top-left: ({px_left}, {px_top}) px\n'
+            f'- size: {px_w} x {px_h} px{calibration_note}',
+            QMessageBox.Ok)
+
+    def vp_toggle_render_debug(self):
+        self.render_debug_enabled = not self.render_debug_enabled
+        self.vp_draw()
+
+    def vp_toggle_render_antialias(self):
+        self.render_antialias = not self.render_antialias
+        self.vp_draw()
+
     def vp_show_context_menu(self, p):
         """Show context menu after user has right-clicked at position p."""
         px, py = p.x() - constants.VP_MARGIN_X, p.y() - constants.VP_MARGIN_Y
@@ -1129,6 +1279,13 @@ class Viewport(QWidget):
                     'Open settings of selected grid')
             action_openGridSettings.triggered.connect(
                 self._vp_open_grid_settings)
+            if self.selected_ov is not None:
+                action_openOVSettings = menu.addAction(
+                    f'Open settings of OV {self.selected_ov}')
+            else:
+                action_openOVSettings = menu.addAction(
+                    'Open settings of selected OV')
+            action_openOVSettings.triggered.connect(self._vp_open_ov_settings)
             action_selectAll = menu.addAction('Select all tiles ' + grid_str)
             action_selectAll.triggered.connect(self.vp_activate_all_tiles)
             action_deselectAll = menu.addAction(
@@ -1172,6 +1329,26 @@ class Viewport(QWidget):
                 if tile_index is not None:
                     action_image = menu.addAction(f'Acquire Tile {grid_label}.{tile_index}')
                     action_image.triggered.connect(self._vp_acquire_tile)
+                    action_registrationCheck = menu.addAction(
+                        f'Registration check for {grid_label}.{tile_index}')
+                    action_registrationCheck.triggered.connect(
+                        self.vp_registration_check)
+                else:
+                    action_registrationCheck = None
+            else:
+                action_registrationCheck = None
+            if self.selected_ov is not None:
+                action_acquireOV = menu.addAction(
+                    f'Acquire OV {self.selected_ov}')
+                action_acquireOV.triggered.connect(
+                    lambda _, ov_index=self.selected_ov:
+                        self.vp_acquire_specific_overview(ov_index))
+                action_clearOV = menu.addAction(
+                    f'Clear OV {self.selected_ov} image')
+                action_clearOV.triggered.connect(self._vp_clear_selected_ov_image)
+            else:
+                action_acquireOV = None
+                action_clearOV = None
             action_move = menu.addAction(current_pos_str)
             action_move.triggered.connect(self._vp_manual_stage_move)
             action_stub = menu.addAction('Acquire stub OV at this position')
@@ -1187,6 +1364,34 @@ class Viewport(QWidget):
             action_modifyImported = menu.addAction('Modify imported images')
             action_modifyImported.triggered.connect(
                 self._vp_open_modify_images_dlg)
+            action_ovQueue = menu.addAction('Open OV queue panel')
+            action_ovQueue.triggered.connect(self.vp_open_ov_queue_panel)
+
+            menu.addSeparator()
+            if grid_index is not None:
+                grid_locked = self.gm[grid_index].locked
+                action_gridLock = menu.addAction(
+                    f'{"Unlock" if grid_locked else "Lock"} {grid_label}')
+                action_gridLock.triggered.connect(
+                    lambda _, index=grid_index: self._vp_toggle_grid_lock(index))
+            else:
+                action_gridLock = None
+            if self.selected_ov is not None:
+                ov_locked = self.ovm[self.selected_ov].locked
+                action_ovLock = menu.addAction(
+                    f'{"Unlock" if ov_locked else "Lock"} OV {self.selected_ov}')
+                action_ovLock.triggered.connect(
+                    lambda _, index=self.selected_ov: self._vp_toggle_ov_lock(index))
+            else:
+                action_ovLock = None
+            action_toggleRenderDebug = menu.addAction(
+                'Render diagnostics: '
+                + ('on' if self.render_debug_enabled else 'off'))
+            action_toggleRenderDebug.triggered.connect(self.vp_toggle_render_debug)
+            action_toggleAntialias = menu.addAction(
+                'Overlay anti-aliasing: '
+                + ('on' if self.render_antialias else 'off'))
+            action_toggleAntialias.triggered.connect(self.vp_toggle_render_antialias)
 
             # ----- Array items -----
             if self.gm.array_mode:
@@ -1263,6 +1468,12 @@ class Viewport(QWidget):
                 action_openGridSettings.setEnabled(False)
                 action_selectAll.setEnabled(False)
                 action_deselectAll.setEnabled(False)
+            if self.selected_ov is None:
+                action_openOVSettings.setEnabled(False)
+                if action_acquireOV is not None:
+                    action_acquireOV.setEnabled(False)
+                if action_clearOV is not None:
+                    action_clearOV.setEnabled(False)
             if (self.selected_template is None and grid_index is None
                     and action_changeRotation is not None):
                 action_changeRotation.setEnabled(False)
@@ -1276,6 +1487,7 @@ class Viewport(QWidget):
             if self.busy:
                 action_focusTool.setEnabled(False)
                 action_openGridSettings.setEnabled(False)
+                action_openOVSettings.setEnabled(False)
                 if action_changeRotation is not None:
                     action_changeRotation.setEnabled(False)
                 action_selectAll.setEnabled(False)
@@ -1284,9 +1496,19 @@ class Viewport(QWidget):
                 action_move.setEnabled(False)
                 action_stub.setEnabled(False)
                 action_import.setEnabled(False)
+                if action_acquireOV is not None:
+                    action_acquireOV.setEnabled(False)
+                if action_registrationCheck is not None:
+                    action_registrationCheck.setEnabled(False)
+                if action_gridLock is not None:
+                    action_gridLock.setEnabled(False)
+                if action_ovLock is not None:
+                    action_ovLock.setEnabled(False)
             if self.sem.simulation_mode:
                 action_move.setEnabled(False)
                 action_stub.setEnabled(False)
+                if action_acquireOV is not None:
+                    action_acquireOV.setEnabled(False)
             menu.exec_(self.mapToGlobal(p))
 
     def _vp_get_closest_grid_id(self, sx_sy):
@@ -1355,6 +1577,7 @@ class Viewport(QWidget):
 
     def vp_draw(self, suppress_labels=False, suppress_previews=False):
         """Draw all elements on Viewport canvas"""
+        draw_started = time()
         show_debris_area = (self.ovm.detection_area_visible
                             and self.acq.use_debris_detection)
         if self.ov_drag_active or self.grid_drag_active or self.template_drag_active:
@@ -1363,6 +1586,7 @@ class Viewport(QWidget):
         self.vp_canvas.fill(Qt.black)
         # Begin painting on canvas
         self.vp_qp.begin(self.vp_canvas)
+        self.vp_qp.setRenderHint(QPainter.Antialiasing, self.render_antialias)
         # First, show stub OV if option selected and stub OV image exists:
         if self.show_stub_ov:
             self._vp_place_stub_overview(self.ovm['stub_lm'])
@@ -1415,6 +1639,7 @@ class Viewport(QWidget):
         if self.grid_draw_active:
             self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
                                  constants.COLOUR_SELECTOR[0], line_style=Qt.DashLine)
+            self._vp_draw_live_grid_layout()
         if self.ov_draw_active:
             self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
                                  constants.COLOUR_SELECTOR[10], line_style=Qt.DashLine)
@@ -1447,10 +1672,14 @@ class Viewport(QWidget):
         # Show current stage position
         if self.show_stage_pos:
             self._show_stage_position_indicator()
+        self._vp_draw_selection_overlay()
+        if self.render_debug_enabled:
+            self._vp_draw_render_diagnostics((time() - draw_started) * 1000)
         self.vp_qp.end()
         # All elements have been drawn on the canvas, now show them in the
         # Viewport window.
         self.QLabel_ViewportCanvas.setPixmap(self.vp_canvas)
+        self._refresh_ov_queue()
         # Update text labels (bottom of the Viewport window)
         self.label_FOVSize.setText(
             '{0:.1f}'.format(self.cs.vp_width / self.cs.vp_scale)
@@ -1496,6 +1725,38 @@ class Viewport(QWidget):
                 f"landmark {landmark_id}",
             )
 
+    def _vp_draw_live_grid_layout(self):
+        """Display live rows/cols growth while user drags a new grid ROI."""
+        x0, y0 = self.cs.convert_mouse_to_v(self.drag_origin)
+        x1, y1 = self.cs.convert_mouse_to_v(self.drag_current)
+        if x0 > x1:
+            x1, x0 = x0, x1
+        if y0 > y1:
+            y1, y0 = y0, y1
+        w = x1 - x0
+        h = y1 - y0
+        if w <= 0 or h <= 0:
+            return
+        layout = self.gm.estimate_grid_layout_for_drag(x0, y0, w, h)
+        footprint_w, footprint_h = layout['footprint_um']
+        fp0 = self.cs.convert_d_to_v((x0, y0))
+        fp1 = self.cs.convert_d_to_v((x0 + footprint_w, y0 + footprint_h))
+        self._draw_rectangle(
+            self.vp_qp, fp0, fp1, constants.COLOUR_SELECTOR[12], line_style=Qt.DotLine)
+        text = (
+            f"Grid preview: {layout['rows']} x {layout['cols']} tiles "
+            f"({layout['tile_count']} total)")
+        text_rect = QRectF(
+            min(self.drag_origin[0], self.drag_current[0]) + 8,
+            min(self.drag_origin[1], self.drag_current[1]) - 24,
+            320,
+            18)
+        self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
+        self.vp_qp.setBrush(QColor(255, 255, 255, 210))
+        self.vp_qp.drawRect(text_rect)
+        self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
+        self.vp_qp.drawText(text_rect, Qt.AlignVCenter | Qt.AlignHCenter, text)
+
     def _show_simulation_mode_indicator(self):
         """Draw simulation mode indicator on viewport canvas.
         QPainter object self.vp_qp must be active when calling this method.
@@ -1522,6 +1783,73 @@ class Viewport(QWidget):
         self.vp_qp.setFont(font)
         self.vp_qp.drawText(7, 21, custom_text)
 
+    def _vp_draw_selection_overlay(self):
+        lines = []
+        if self.selected_grid is not None:
+            grid = self.gm[self.selected_grid]
+            grid_label = self.gm.get_grid_label(self.selected_grid)
+            lines.append(
+                f'Selected: {grid_label} | active={int(grid.active)} '
+                f'locked={int(grid.locked)} acquired={int(grid.acquired)}')
+            min_x, max_x, min_y, max_y = grid.bounding_box()
+            top_left_v = self.cs.convert_d_to_v((min_x, min_y))
+            bottom_right_v = self.cs.convert_d_to_v((max_x, max_y))
+            x0 = min(top_left_v[0], bottom_right_v[0])
+            y0 = min(top_left_v[1], bottom_right_v[1])
+            width = abs(bottom_right_v[0] - top_left_v[0])
+            height = abs(bottom_right_v[1] - top_left_v[1])
+            self.vp_qp.setPen(QPen(QColor(255, 210, 0), 2, Qt.DashLine))
+            self.vp_qp.setBrush(QColor(0, 0, 0, 0))
+            self.vp_qp.drawRect(QRectF(
+                x0, y0, width, height))
+        if self.selected_ov is not None:
+            ov = self.ovm[self.selected_ov]
+            lines.append(
+                f'Selected: OV {self.selected_ov} | active={int(ov.active)} '
+                f'locked={int(ov.locked)} acquired={int(ov.acquired)}')
+            min_x, min_y, max_x, max_y = ov.bounding_box()
+            top_left_v = self.cs.convert_d_to_v((min_x, min_y))
+            bottom_right_v = self.cs.convert_d_to_v((max_x, max_y))
+            x0 = min(top_left_v[0], bottom_right_v[0])
+            y0 = min(top_left_v[1], bottom_right_v[1])
+            width = abs(bottom_right_v[0] - top_left_v[0])
+            height = abs(bottom_right_v[1] - top_left_v[1])
+            self.vp_qp.setPen(QPen(QColor(255, 255, 120), 2, Qt.DashLine))
+            self.vp_qp.setBrush(QColor(0, 0, 0, 0))
+            self.vp_qp.drawRect(QRectF(
+                x0, y0, width, height))
+        if not lines:
+            return
+        width = 440
+        height = 18 * len(lines) + 8
+        panel_rect = QRectF(8, 24, width, height)
+        self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
+        self.vp_qp.setBrush(QColor(40, 40, 40, 190))
+        self.vp_qp.drawRect(panel_rect)
+        self.vp_qp.setPen(QPen(QColor(230, 230, 230), 1, Qt.SolidLine))
+        font = QFont()
+        font.setPixelSize(12)
+        self.vp_qp.setFont(font)
+        for i, line in enumerate(lines):
+            self.vp_qp.drawText(
+                QRectF(12, 28 + i * 18, width - 8, 16),
+                Qt.AlignVCenter | Qt.AlignLeft, line)
+
+    def _vp_draw_render_diagnostics(self, draw_time_ms):
+        text = (
+            f"Render diagnostics: antialias={int(self.render_antialias)} "
+            f"scale={self.cs.vp_scale:.3f} draw={draw_time_ms:.1f} ms "
+            f"layers(OV={self.ovm.number_ov}, grid={self.gm.number_grids})")
+        self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
+        self.vp_qp.setBrush(QColor(255, 255, 255, 215))
+        self.vp_qp.drawRect(QRectF(8, self.cs.vp_height - 26, 520, 18))
+        self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
+        font = QFont()
+        font.setPixelSize(11)
+        self.vp_qp.setFont(font)
+        self.vp_qp.drawText(QRectF(12, self.cs.vp_height - 24, 516, 16),
+                            Qt.AlignVCenter | Qt.AlignLeft, text)
+
     def _show_stage_position_indicator(self):
         """Draw red bullseye indicator at last known stage position.
         QPainter object self.vp_qp must be active when caling this method.
@@ -1531,10 +1859,9 @@ class Viewport(QWidget):
                 self.cs.convert_s_to_d(self.stage.last_known_xy))
         except TypeError: # last_known_xy not defined (e.g. simulation mode)
             return
-        size = self.cs.vp_scale * 5
-        if size < 10:
-            size = 10
-        self.vp_qp.setPen(QPen(QColor(255, 0, 0), 2, Qt.SolidLine))
+        size = float(np.clip(12 * np.sqrt(max(self.cs.vp_scale, 1e-3)), 6, 36))
+        pen_width = int(np.clip(size / 8, 1, 4))
+        self.vp_qp.setPen(QPen(QColor(255, 0, 0), pen_width, Qt.SolidLine))
         self.vp_qp.setBrush(QColor(255, 0, 0, 0))
         self.vp_qp.drawEllipse(QPointF(vx, vy), size, size)
         self.vp_qp.setBrush(QColor(255, 0, 0, 0))
@@ -1783,31 +2110,37 @@ class Viewport(QWidget):
                                 Qt.AlignVCenter | Qt.AlignHCenter,
                                 ov_label_text)
 
-        # If OV inactive return after drawing label
-        if not self.ovm[ov_index].active:
-            return
-
-        cropped_img = self.ovm[ov_index].image.copy(crop_area)
-        v_width = cropped_img.size().width()
-        cropped_resized_img = cropped_img.scaledToWidth(
-            int(v_width * resize_ratio))
-        if not (self.ov_drag_active and ov_index == self.selected_ov):
-            # Draw OV
-            self.vp_qp.drawPixmap(QPointF(vx_cropped, vy_cropped),
-                                  cropped_resized_img)
-        # Draw blue rectangle around OV.
+        if self.ovm[ov_index].active:
+            cropped_img = self.ovm[ov_index].image.copy(crop_area)
+            v_width = cropped_img.size().width()
+            cropped_resized_img = cropped_img.scaledToWidth(
+                int(v_width * resize_ratio))
+            if not (self.ov_drag_active and ov_index == self.selected_ov):
+                # Draw OV
+                self.vp_qp.drawPixmap(QPointF(vx_cropped, vy_cropped),
+                                      cropped_resized_img)
+        pen_style = Qt.SolidLine if self.ovm[ov_index].active else Qt.DashLine
+        pen_width = 2
+        if self.ovm[ov_index].locked:
+            pen_width = 3
+        if ov_index == self.selected_ov:
+            pen_width = max(3, pen_width)
+        # Draw blue rectangle around OV (for active and inactive OVs).
         self.vp_qp.setPen(
-            QPen(QColor(*constants.COLOUR_SELECTOR[10]), 2, Qt.SolidLine))
+            QPen(QColor(*constants.COLOUR_SELECTOR[10]), pen_width, pen_style))
         if ((self.ov_acq_indicator is not None)
             and self.ov_acq_indicator == ov_index):
             self.vp_qp.setBrush(QColor(*constants.COLOUR_SELECTOR[12]))
-        else:
+        elif self.ovm[ov_index].active:
             self.vp_qp.setBrush(QColor(0, 0, 0, 0))
+        else:
+            # Keep inactive OV footprints visible without requiring activation.
+            self.vp_qp.setBrush(QColor(0, 0, 255, 25))
         self.vp_qp.drawRect(QRectF(vx, vy,
                             width_px * resize_ratio,
                             height_px * resize_ratio))
 
-        if show_debris_area:
+        if show_debris_area and self.ovm[ov_index].active:
             # w3, w4 are fudge factors for clearer display
             w3 = np.clip(self.cs.vp_scale/2, 1, 3)
             w4 = np.clip(self.cs.vp_scale, 5, 9)
@@ -1890,7 +2223,7 @@ class Viewport(QWidget):
                 -grid.tile_width_d() / 2 * self.cs.vp_scale,
                 -grid.tile_height_d() / 2 * self.cs.vp_scale)
             # Enable anti-aliasing
-            self.vp_qp.setRenderHint(QPainter.Antialiasing)
+            self.vp_qp.setRenderHint(QPainter.Antialiasing, self.render_antialias)
         else:
             # Translate painter to coordinates of top-left corner
             self.vp_qp.translate(topleft_vx, topleft_vy)
@@ -2598,9 +2931,8 @@ class Viewport(QWidget):
                 p_width = self.ovm[ov_index].width_d() * self.cs.vp_scale
                 p_height = self.ovm[ov_index].height_d() * self.cs.vp_scale
                 x, y = px - pixel_offset_x, py - pixel_offset_y
-                # Check if the current OV is active and if mouse click position
-                # is within its area
-                if self.ovm[ov_index].active and x >= 0 and y >= 0:
+                # Check if mouse click position is within OV area
+                if x >= 0 and y >= 0:
                     if x < p_width and y < p_height:
                         selected_ov = ov_index
                         break
@@ -2764,6 +3096,13 @@ class Viewport(QWidget):
 
     def _vp_move_grid_to_current_stage_position(self):
         """Move the selected grid to the current stage position (MagC)."""
+        if self.gm[self.selected_grid].locked:
+            QMessageBox.information(
+                self, 'Grid locked',
+                f'{self.gm.get_grid_label(self.selected_grid)} is locked.\n'
+                'Unlock it first to change location.',
+                QMessageBox.Ok)
+            return
         x, y = self.stage.get_xy()
         self.gm[self.selected_grid].centre_sx_sy = [x, y]
         self.gm[self.selected_grid].update_tile_positions()
@@ -2849,34 +3188,48 @@ class Viewport(QWidget):
         self.main_controls_trigger.transmit('UNRESTRICT GUI')
         self.main_controls_trigger.transmit('STATUS IDLE')
 
+    def _vp_start_ov_acquisition(self, selection):
+        self._add_to_main_log(
+            'CTRL: User-requested acquisition of OV image(s) started.')
+        self.restrict_gui(True)
+        self.main_controls_trigger.transmit('RESTRICT GUI')
+        self.main_controls_trigger.transmit('STATUS BUSY OV')
+        # Start OV acquisition thread
+        utils.run_log_thread(acq_func.acquire_ov,
+                             self.acq.base_dir, selection,
+                             self.sem, self.stage, self.ovm, self.img_inspector,
+                             self.main_controls_trigger, self.viewport_trigger)
+
+    def vp_acquire_specific_overview(self, ov_index):
+        if ov_index is None or ov_index < 0 or ov_index >= self.ovm.number_ov:
+            QMessageBox.information(
+                self, 'Acquire overview',
+                'Please select a valid overview first.',
+                QMessageBox.Ok)
+            return
+        self.vp_current_ov = ov_index
+        self.vp_update_ov_selector()
+        self._vp_start_ov_acquisition(ov_index)
+
     def vp_acquire_overview(self):
         """Acquire one selected or all overview images."""
-        if self.vp_current_ov > -2:
-            user_reply = None
-            if (self.vp_current_ov == -1) and (self.ovm.number_ov > 1):
-                user_reply = QMessageBox.question(
-                    self, 'Acquisition of all overview images',
-                    'This will acquire all active overview images.\n\n' +
-                    'Do you wish to proceed?',
-                    QMessageBox.Ok | QMessageBox.Cancel)
-            if (user_reply == QMessageBox.Ok or self.vp_current_ov >= 0
-                or (self.ovm.number_ov == 1 and self.vp_current_ov == -1)):
-                self._add_to_main_log(
-                    'CTRL: User-requested acquisition of OV image(s) started.')
-                self.restrict_gui(True)
-                self.main_controls_trigger.transmit('RESTRICT GUI')
-                self.main_controls_trigger.transmit('STATUS BUSY OV')
-                # Start OV acquisition thread
-                utils.run_log_thread(acq_func.acquire_ov,
-                                     self.acq.base_dir, self.vp_current_ov,
-                                     self.sem, self.stage, self.ovm, self.img_inspector,
-                                     self.main_controls_trigger, self.viewport_trigger)
-        else:
+        if self.vp_current_ov <= -2:
             QMessageBox.information(
                 self, 'Acquisition of overview image(s)',
                 'Please select "All OVs" or a single OV from the '
                 'pull-down menu.',
                 QMessageBox.Ok)
+            return
+        user_reply = None
+        if (self.vp_current_ov == -1) and (self.ovm.number_ov > 1):
+            user_reply = QMessageBox.question(
+                self, 'Acquisition of all overview images',
+                'This will acquire all active overview images.\n\n'
+                'Do you wish to proceed?',
+                QMessageBox.Ok | QMessageBox.Cancel)
+        if (user_reply == QMessageBox.Ok or self.vp_current_ov >= 0
+                or (self.ovm.number_ov == 1 and self.vp_current_ov == -1)):
+            self._vp_start_ov_acquisition(self.vp_current_ov)
 
     def _vp_overview_acq_success(self, success):
         if success:
@@ -2895,6 +3248,7 @@ class Viewport(QWidget):
         self.main_controls_trigger.transmit('UNRESTRICT GUI')
         self.restrict_gui(False)
         self.main_controls_trigger.transmit('STATUS IDLE')
+        self._refresh_ov_queue()
 
     def _vp_open_stub_overview_dlg(self):
         centre_sx_sy = self.stub_ov_centre

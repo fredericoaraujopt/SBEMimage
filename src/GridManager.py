@@ -60,7 +60,7 @@ class GridManager(list):
         frame_size = json.loads(grids_data['tile_size'])
         frame_size_selector = json.loads(
             grids_data['tile_size_selector'])
-        pixel_size = json.loads(grids_data['pixel_size'])
+        pixel_size = utils.cfg_json_loads(grids_data['pixel_size'])
         dwell_time = json.loads(grids_data['dwell_time'])
         dwell_time_selector = json.loads(
             grids_data['dwell_time_selector'])
@@ -91,6 +91,27 @@ class GridManager(list):
                 grids_data['roi_index'])
         else:
             roi_index = []
+        if 'grid_locked' in grids_data:
+            grid_locked = json.loads(grids_data['grid_locked'])
+        else:
+            grid_locked = []
+        if 'grid_acquired' in grids_data:
+            grid_acquired = json.loads(grids_data['grid_acquired'])
+        else:
+            grid_acquired = []
+        if 'grid_last_acq_ts' in grids_data:
+            grid_last_acq_ts = json.loads(grids_data['grid_last_acq_ts'])
+        else:
+            grid_last_acq_ts = []
+        if 'grid_last_acq_result' in grids_data:
+            grid_last_acq_result = json.loads(grids_data['grid_last_acq_result'])
+        else:
+            grid_last_acq_result = []
+        if 'grid_acquired_origin_sx_sy' in grids_data:
+            grid_acquired_origin_sx_sy = utils.cfg_json_loads(
+                grids_data['grid_acquired_origin_sx_sy'])
+        else:
+            grid_acquired_origin_sx_sy = []
 
         # Backward compatibility for loading older config files
         if len(grid_active) < self.number_grids:
@@ -107,6 +128,16 @@ class GridManager(list):
             array_index = [None] * self.number_grids
         if len(roi_index) < self.number_grids:
             roi_index = [None] * self.number_grids
+        if len(grid_locked) < self.number_grids:
+            grid_locked = [0] * self.number_grids
+        if len(grid_acquired) < self.number_grids:
+            grid_acquired = [0] * self.number_grids
+        if len(grid_last_acq_ts) < self.number_grids:
+            grid_last_acq_ts = [''] * self.number_grids
+        if len(grid_last_acq_result) < self.number_grids:
+            grid_last_acq_result = ['not_imaged'] * self.number_grids
+        if len(grid_acquired_origin_sx_sy) < self.number_grids:
+            grid_acquired_origin_sx_sy = [None] * self.number_grids
 
         # Create a list of grid objects with the parameters read from
         # the session configuration.
@@ -119,7 +150,12 @@ class GridManager(list):
                         display_colour[i], acq_interval[i],
                         acq_interval_offset[i], wd_stig_xy[i],
                         use_wd_gradient[i] == 1, wd_gradient_ref_tiles[i],
-                        wd_gradient_params[i])
+                        wd_gradient_params[i],
+                        locked=grid_locked[i] == 1,
+                        acquired=grid_acquired[i] == 1,
+                        last_acquisition_timestamp=grid_last_acq_ts[i],
+                        last_acquisition_result=grid_last_acq_result[i],
+                        acquired_origin_sx_sy=grid_acquired_origin_sx_sy[i])
             grid.array_index = array_index[i]
             grid.roi_index = roi_index[i]
             self.append(grid)
@@ -235,7 +271,7 @@ class GridManager(list):
             [grid.frame_size for grid in self])
         grids_data['tile_size_selector'] = str(
             [grid.frame_size_selector for grid in self])
-        grids_data['pixel_size'] = str(
+        grids_data['pixel_size'] = utils.serialise_list(
             [grid.pixel_size for grid in self])
         grids_data['dwell_time'] = str(
             [grid.dwell_time for grid in self])
@@ -263,6 +299,17 @@ class GridManager(list):
         grids_data['roi_index'] = (str(
             [grid.roi_index for grid in self])
             .replace('None', 'null'))
+        grids_data['grid_locked'] = str(
+            [int(grid.locked) for grid in self])
+        grids_data['grid_acquired'] = str(
+            [int(grid.acquired) for grid in self])
+        grids_data['grid_last_acq_ts'] = json.dumps(
+            [grid.last_acquisition_timestamp for grid in self])
+        grids_data['grid_last_acq_result'] = json.dumps(
+            [grid.last_acquisition_result for grid in self])
+        grids_data['grid_acquired_origin_sx_sy'] = json.dumps(
+            utils.convert_numpy_to_list(
+                [grid.acquired_origin_sx_sy for grid in self]))
         if self.array_mode:
             array_path = self.array_data.path
         else:
@@ -363,43 +410,79 @@ class GridManager(list):
                 del grid
         self.number_grids = len(self)
 
+    def estimate_grid_layout_for_drag(self, x, y, w, h):
+        """Estimate rows/cols and resulting footprint for a drag-defined ROI."""
+        if self.template_grid_index >= self.number_grids:
+            self.template_grid_index = 0
+        template_grid = self[self.template_grid_index]
+
+        tile_width_d = template_grid.tile_width_d()
+        tile_height_d = template_grid.tile_height_d()
+        overlap_d = template_grid.overlap * template_grid.pixel_size / 1000
+        row_shift_d = template_grid.row_shift * template_grid.pixel_size / 1000
+        pitch_x = max(1e-9, tile_width_d - overlap_d)
+        pitch_y = max(1e-9, tile_height_d - overlap_d)
+
+        cols = int(np.ceil(max(0.0, w - row_shift_d + overlap_d) / pitch_x))
+        rows = int(np.ceil(max(0.0, h + overlap_d) / pitch_y))
+        cols = max(1, cols)
+        rows = max(1, rows)
+
+        footprint_w = cols * tile_width_d - (cols - 1) * overlap_d + row_shift_d
+        footprint_h = rows * tile_height_d - (rows - 1) * overlap_d
+        origin_sx_sy = self.cs.convert_d_to_s((x + tile_width_d / 2, y + tile_height_d / 2))
+
+        return {
+            'rows': rows,
+            'cols': cols,
+            'tile_count': rows * cols,
+            'origin_sx_sy': origin_sx_sy,
+            'footprint_um': (footprint_w, footprint_h),
+            'requested_um': (w, h),
+        }
+
     # TODO: support drawing rotated grids
     def draw_grid(self, x, y, w, h):
-        """Draw grid/tiles rectangle using mouse"""
-        # Use attributes of grid at template_grid_index for new grid
+        """Draw grid/tiles rectangle using mouse."""
         if self.template_grid_index >= self.number_grids:
             self.template_grid_index = 0
         grid = self[self.template_grid_index]
+        layout = self.estimate_grid_layout_for_drag(x, y, w, h)
 
-        tile_width = grid.tile_width_d()
-        tile_height = grid.tile_height_d()
-
-        origin_sx_sy = self.cs.convert_d_to_s((x + tile_width / 2, y + tile_height / 2))
-
-        # size[rows, cols]
-        size = [int(np.ceil(h / tile_height)), int(np.ceil(w / tile_width))]
-
-        # do not use rotation of previous grid!
-        new_grid = self.add_new_grid(origin_sx_sy=origin_sx_sy, sw_sh=(w, h), active=grid.active,
-                                      frame_size=grid.frame_size, frame_size_selector=grid.frame_size_selector,
-                                      overlap=grid.overlap, pixel_size=grid.pixel_size,
-                                      dwell_time=grid.dwell_time, dwell_time_selector=grid.dwell_time_selector,
-                                      bit_depth_selector=grid.bit_depth_selector,
-                                      rotation=0, row_shift=grid.row_shift,
-                                      acq_interval=grid.acq_interval, acq_interval_offset=grid.acq_interval_offset,
-                                      wd_stig_xy=grid.wd_stig_xy, use_wd_gradient=grid.use_wd_gradient,
-                                      wd_gradient_ref_tiles=grid.wd_gradient_ref_tiles, wd_gradient_params=grid.wd_gradient_params,
-                                      size=size)
+        # Keep user drag area for downstream summaries while using area-first
+        # layout calculation for rows/cols.
+        self.add_new_grid(
+            origin_sx_sy=layout['origin_sx_sy'],
+            sw_sh=(w, h),
+            active=grid.active,
+            frame_size=grid.frame_size,
+            frame_size_selector=grid.frame_size_selector,
+            overlap=grid.overlap,
+            pixel_size=grid.pixel_size,
+            dwell_time=grid.dwell_time,
+            dwell_time_selector=grid.dwell_time_selector,
+            bit_depth_selector=grid.bit_depth_selector,
+            rotation=0,
+            row_shift=grid.row_shift,
+            acq_interval=grid.acq_interval,
+            acq_interval_offset=grid.acq_interval_offset,
+            wd_stig_xy=grid.wd_stig_xy,
+            use_wd_gradient=grid.use_wd_gradient,
+            wd_gradient_ref_tiles=grid.wd_gradient_ref_tiles,
+            wd_gradient_params=grid.wd_gradient_params,
+            size=[layout['rows'], layout['cols']],
+        )
 
     def tile_position_for_registration(self, grid_index, tile_index):
         """Provide tile location (upper left corner of tile) in nanometres.
         TODO: What is the best way to deal with grid rotations?
         """
-        dx, dy = self.cs.convert_s_to_d(
-            self[grid_index][tile_index].sx_sy)
-        width_d = self[grid_index].width_d()
-        height_d = self[grid_index].height_d()
-        return int((dx - width_d/2) * 1000), int((dy - height_d/2) * 1000)
+        tile = self[grid_index][tile_index]
+        sx_sy = tile.sx_sy if tile.acquired_sx_sy is None else tile.acquired_sx_sy
+        dx, dy = self.cs.convert_s_to_d(sx_sy)
+        tile_width_d = self[grid_index].tile_width_d()
+        tile_height_d = self[grid_index].tile_height_d()
+        return int((dx - tile_width_d / 2) * 1000), int((dy - tile_height_d / 2) * 1000)
 
     def total_number_active_grids(self):
         """Return the total number of active grids."""

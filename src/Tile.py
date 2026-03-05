@@ -18,7 +18,8 @@ class Tile:
 
     def __init__(self, px_py=(0, 0), dx_dy=(0, 0), sx_sy=(0, 0),
                  wd=0, stig_xy=(0, 0), tile_active=False,
-                 autofocus_active=False, wd_grad_active=False):
+                 autofocus_active=False, wd_grad_active=False,
+                 acquired_sx_sy=None):
         # Relative pixel (p) coordinates of the tile, unrotated grid:
         # Upper left (origin) tile: 0, 0
         self.px_py = np.array(px_py)
@@ -38,6 +39,8 @@ class Tile:
         self.tile_active = tile_active
         self.autofocus_active = autofocus_active
         self.wd_grad_active = wd_grad_active
+        self.acquired_sx_sy = (
+            np.array(acquired_sx_sy) if acquired_sx_sy is not None else None)
         self.preview_img = None
 
     @property

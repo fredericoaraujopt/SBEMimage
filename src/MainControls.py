@@ -30,7 +30,8 @@ from time import sleep
 #import xml.etree.ElementTree as ET
 
 from qtpy.QtWidgets import QApplication, QMainWindow, QMessageBox, QInputDialog, QLineEdit, \
-                            QAbstractItemView, QPushButton, QProgressDialog, QFileDialog, QHeaderView
+                            QAbstractItemView, QPushButton, QProgressDialog, QFileDialog, QHeaderView, \
+                            QAction, QToolBar
 from qtpy.QtCore import Qt, QRect, QSize, QEvent, QItemSelection, QItemSelectionModel
 from qtpy.QtGui import QIcon, QPalette, QColor, QPixmap, QKeyEvent, \
                         QStatusTipEvent, QStandardItem, QStandardItemModel
@@ -606,6 +607,16 @@ class MainControls(QMainWindow):
             lambda: self.save_config_to_disk(show_msg=True))
         self.actionSaveNewConfig.triggered.connect(
             self.open_save_settings_new_file_dlg)
+        self.actionNewProject = QAction(
+            QIcon('img/selectdir.png'),
+            'New Project...',
+            self)
+        self.actionNewProject.setToolTip(
+            'Create a new project context (config + base dir + reset state).')
+        self.actionNewProject.triggered.connect(self.open_new_project_dlg)
+        self.menuConfiguration.insertAction(
+            self.actionSaveConfig, self.actionNewProject)
+        self.menuConfiguration.insertSeparator(self.actionSaveConfig)
         self.actionLeaveSimulationMode.triggered.connect(
             self.leave_simulation_mode)
         self.actionAboutBox.triggered.connect(self.open_about_box)
@@ -617,6 +628,11 @@ class MainControls(QMainWindow):
             self.open_cut_duration_dlg)
         self.actionExport.triggered.connect(self.open_export_dlg)
         self.actionUpdate.triggered.connect(self.open_update_dlg)
+        self.projectToolBar = QToolBar('Project', self)
+        self.projectToolBar.setObjectName('projectToolBar')
+        self.projectToolBar.setMovable(False)
+        self.addToolBar(Qt.TopToolBarArea, self.projectToolBar)
+        self.projectToolBar.addAction(self.actionNewProject)
         # Buttons for testing purposes (third tab)
         self.pushButton_testGetMag.clicked.connect(self.test_get_mag)
         self.pushButton_testSetMag.clicked.connect(self.test_set_mag)
@@ -1591,6 +1607,161 @@ class MainControls(QMainWindow):
             # Show new config file name in status bar
             self.set_statusbar('Ready.')
 
+    def _directory_is_writable(self, target_dir):
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            test_file = os.path.join(target_dir, '.sbemimage_write_test.tmp')
+            with open(test_file, 'w', encoding='utf-8') as fp:
+                fp.write('ok')
+            os.remove(test_file)
+            return True, ''
+        except Exception as e:
+            return False, str(e)
+
+    def _optional_reinitialize_anchors(self):
+        while self.gm.number_grids > 1:
+            self.gm.delete_grid()
+        while self.ovm.number_ov > 1:
+            self.ovm.delete_overview()
+
+        grid0 = self.gm[0]
+        grid0.active = True
+        grid0.locked = False
+        grid0.mark_not_acquired('not_imaged')
+        grid0.activate_all_tiles()
+
+        ov0 = self.ovm[0]
+        ov0.active = True
+        ov0.locked = False
+        ov0.vp_file_path = ''
+        ov0.mark_not_acquired('not_imaged')
+
+        self.gm.template_grid_index = 0
+        self.ovm.template_ov_index = 0
+
+    def _reset_project_workspace_state(self):
+        for grid_index in range(self.gm.number_grids):
+            grid = self.gm[grid_index]
+            grid.clear_all_tile_previews()
+            grid.locked = False
+            grid.mark_not_acquired('not_imaged')
+            for tile_index in range(grid.number_tiles):
+                grid[tile_index].acquired_sx_sy = None
+
+        for ov_index in range(self.ovm.number_ov):
+            ov = self.ovm[ov_index]
+            ov.vp_file_path = ''
+            ov.locked = False
+            ov.mark_not_acquired('not_imaged')
+
+        self.ovm['stub'].vp_file_path = ''
+        self.ovm['stub_lm'].vp_file_path = ''
+
+        self.imported.delete_all_images()
+        self.array_set_import_image()
+
+        self.acq.reset_acquisition()
+        self.pushButton_resetAcq.setEnabled(False)
+        self.pushButton_pauseAcq.setEnabled(False)
+        self.pushButton_startAcq.setEnabled(True)
+        self.pushButton_startAcq.setText('START')
+        self.progressBar.setValue(0)
+        self.label_currentPosition.setText('---')
+
+    def open_new_project_dlg(self):
+        """Create a clean project context in one guided action."""
+        if self.busy:
+            QMessageBox.information(
+                self, 'Program busy',
+                'Finish or pause the current operation before starting a new project.',
+                QMessageBox.Ok)
+            return
+
+        new_syscfg = (self.cfg_file == 'default.ini')
+        if new_syscfg:
+            cfg_dlg = SaveConfigDlg('', True)
+        else:
+            cfg_dlg = SaveConfigDlg(self.syscfg_file)
+        if not cfg_dlg.exec():
+            return
+
+        new_cfg_file = cfg_dlg.file_name
+        new_syscfg_file = cfg_dlg.sysfile_name if new_syscfg else self.syscfg_file
+
+        selected_base_dir = QFileDialog.getExistingDirectory(
+            self, 'Select base directory for new project', self.acq.base_dir)
+        if not selected_base_dir:
+            return
+
+        writable, err = self._directory_is_writable(selected_base_dir)
+        if not writable:
+            QMessageBox.warning(
+                self, 'Directory is not writable',
+                f'Cannot write to:\n{selected_base_dir}\n\n{err}',
+                QMessageBox.Ok)
+            return
+
+        reinit_reply = QMessageBox.question(
+            self, 'Reinitialize OV 0 / Grid 0?',
+            'Optional step: reinitialize anchors by keeping only OV 0 and Grid 0.\n\n'
+            'Yes: keep only OV 0 and Grid 0.\n'
+            'No: keep current OV/grid list but clear acquisition state/images.',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes)
+        reinitialize_anchors = (reinit_reply == QMessageBox.Yes)
+
+        preview_text = (
+            'Preview changes (dry-run):\n\n'
+            f'- Session config file: {new_cfg_file}\n'
+            f'- System config file: {new_syscfg_file}\n'
+            f'- Base directory: {selected_base_dir}\n'
+            '- Reset: slice counter, delta-Z, interruption state\n'
+            '- Clear: OV images, stub images, tile previews, imported overlays\n'
+            f'- Reinitialize OV 0 / Grid 0: {"yes" if reinitialize_anchors else "no"}\n\n'
+            'Apply these changes now?')
+        apply_reply = QMessageBox.question(
+            self, 'Start new project', preview_text,
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes)
+        if apply_reply != QMessageBox.Yes:
+            return
+
+        self.cfg_file = new_cfg_file
+        self.syscfg_file = new_syscfg_file
+        self.cfg['sys']['sys_config_file'] = self.syscfg_file
+
+        self.acq.base_dir = selected_base_dir
+        self.cfg['acq']['base_dir'] = selected_base_dir
+        workspace_dir = os.path.join(selected_base_dir, 'workspace')
+        imported_dir = os.path.join(selected_base_dir, 'imported')
+        if not os.path.exists(workspace_dir):
+            self.try_to_create_directory(workspace_dir)
+        if not os.path.exists(imported_dir):
+            self.try_to_create_directory(imported_dir)
+        self.imported.target_dir = imported_dir
+
+        self._reset_project_workspace_state()
+        if reinitialize_anchors:
+            self._optional_reinitialize_anchors()
+
+        self.update_main_controls_grid_selector(0)
+        self.update_main_controls_ov_selector(0)
+        self.viewport.update_grids()
+        self.viewport.update_ov()
+        self.show_current_settings()
+        self.show_stack_acq_estimates()
+        self.viewport.vp_draw()
+        self.save_config_to_disk(show_msg=True)
+        self.set_statusbar('Ready.')
+        utils.log_info(
+            'CTRL',
+            f'New project initialized (cfg={self.cfg_file}, base_dir={self.acq.base_dir}).')
+        QMessageBox.information(
+            self, 'New project ready',
+            'New project context was created and saved.\n'
+            'You can now define OVs/grids and begin setup.',
+            QMessageBox.Ok)
+
     def open_sem_dlg(self):
         dialog = SEMSettingsDlg(self.sem)
         if dialog.exec():
@@ -1656,8 +1827,10 @@ class MainControls(QMainWindow):
         dialog = CutDurationDlg(self.microtome)
         dialog.exec()
 
-    def open_ov_dlg(self):
-        dialog = OVSettingsDlg(self.ovm, self.sem, self.ov_index_dropdown,
+    def open_ov_dlg(self, selected_ov=None):
+        if selected_ov is None:
+            selected_ov = self.ov_index_dropdown
+        dialog = OVSettingsDlg(self.ovm, self.sem, selected_ov,
                                self.trigger)
         # self.update_from_ov_dlg() is called when user saves settings
         # or adds/deletes OVs.
@@ -2026,6 +2199,8 @@ class MainControls(QMainWindow):
             self.open_change_grid_rotation_dlg(*args, **kwargs)
         elif msg == 'OPEN GRID SETTINGS':
             self.open_grid_dlg(*args, **kwargs)
+        elif msg == 'OPEN OV SETTINGS':
+            self.open_ov_dlg(*args, **kwargs)
         elif msg == 'Z WARNING':
             QMessageBox.warning(
                 self, 'Z position mismatch',
@@ -2143,6 +2318,8 @@ class MainControls(QMainWindow):
         self.pushButton_resetAcq.setEnabled(idle)
         # Disable/enable menu
         self.menubar.setEnabled(idle)
+        if hasattr(self, 'projectToolBar'):
+            self.projectToolBar.setEnabled(idle)
         # Restrict GUI (microtome-specific functionality) if no microtome used
         if not self.use_microtome or self.syscfg['device']['microtome'] == '6':
             self.restrict_gui_for_sem_stage()

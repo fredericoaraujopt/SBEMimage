@@ -36,6 +36,7 @@ class Overview(Grid):
         self.image = None
         self.vp_file_path = vp_file_path    # this will load the image if found
         self.debris_detection_area = debris_detection_area
+        self.acquired_centre_sx_sy = None
 
     @property
     def centre_sx_sy(self):
@@ -93,6 +94,19 @@ class Overview(Grid):
         bottom_right_dx = top_left_dx + self.width_d()
         bottom_right_dy = top_left_dy + self.height_d()
         return (top_left_dx, top_left_dy, bottom_right_dx, bottom_right_dy)
+
+    def mark_acquired(self, result='success', timestamp=''):
+        self.acquired = True
+        self.locked = True
+        self.last_acquisition_result = result
+        self.last_acquisition_timestamp = timestamp
+        self.acquired_centre_sx_sy = list(self.centre_sx_sy)
+
+    def mark_not_acquired(self, result='not_imaged', timestamp=''):
+        self.acquired = False
+        self.last_acquisition_result = result
+        self.last_acquisition_timestamp = timestamp
+        self.acquired_centre_sx_sy = None
 
     def update_debris_detection_area(self, grid_manager,
                                      auto_detection=True, margin=0):

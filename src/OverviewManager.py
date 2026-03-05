@@ -43,7 +43,7 @@ class OverviewManager:
         ov_size = json.loads(self.cfg['overviews']['ov_size'])
         ov_size_selector = json.loads(self.cfg['overviews']['ov_size_selector'])
 
-        ov_pixel_size = json.loads(
+        ov_pixel_size = utils.cfg_json_loads(
             self.cfg['overviews']['ov_pixel_size'])
         # self.calculate_ov_mag_from_pixel_size()
         ov_dwell_time = json.loads(self.cfg['overviews']['ov_dwell_time'])
@@ -58,8 +58,31 @@ class OverviewManager:
             self.cfg['overviews']['ov_acq_interval_offset'])
         ov_vp_file_paths = json.loads(
             self.cfg['overviews']['ov_viewport_images'])
+        if 'ov_locked' in self.cfg['overviews']:
+            ov_locked = json.loads(self.cfg['overviews']['ov_locked'])
+        else:
+            ov_locked = []
+        if 'ov_acquired' in self.cfg['overviews']:
+            ov_acquired = json.loads(self.cfg['overviews']['ov_acquired'])
+        else:
+            ov_acquired = []
+        if 'ov_last_acq_ts' in self.cfg['overviews']:
+            ov_last_acq_ts = json.loads(self.cfg['overviews']['ov_last_acq_ts'])
+        else:
+            ov_last_acq_ts = []
+        if 'ov_last_acq_result' in self.cfg['overviews']:
+            ov_last_acq_result = json.loads(self.cfg['overviews']['ov_last_acq_result'])
+        else:
+            ov_last_acq_result = []
+        if 'ov_acquired_centre_sx_sy' in self.cfg['overviews']:
+            ov_acquired_centre_sx_sy = utils.cfg_json_loads(
+                self.cfg['overviews']['ov_acquired_centre_sx_sy'])
+        else:
+            ov_acquired_centre_sx_sy = []
         debris_detection_area = json.loads(
             self.cfg['debris']['detection_area'])
+        self.new_ov_default_active = utils.str_to_bool(
+            self.cfg['overviews'].get('new_ov_default_active', 'True'))
 
         # Backward compatibility for loading older config files
         if len(ov_active) < self.number_ov:
@@ -68,6 +91,16 @@ class OverviewManager:
             ov_wd_stig_xy = [[0, 0, 0]] * self.number_ov
         if len(ov_bit_depth_selector) < self.number_ov:
             ov_bit_depth_selector = [0] * self.number_ov
+        if len(ov_locked) < self.number_ov:
+            ov_locked = [0] * self.number_ov
+        if len(ov_acquired) < self.number_ov:
+            ov_acquired = [0] * self.number_ov
+        if len(ov_last_acq_ts) < self.number_ov:
+            ov_last_acq_ts = [''] * self.number_ov
+        if len(ov_last_acq_result) < self.number_ov:
+            ov_last_acq_result = ['not_imaged'] * self.number_ov
+        if len(ov_acquired_centre_sx_sy) < self.number_ov:
+            ov_acquired_centre_sx_sy = [None] * self.number_ov
 
         # Create OV objects
         self.__overviews = []
@@ -79,6 +112,11 @@ class OverviewManager:
                                 ov_bit_depth_selector[i], ov_acq_interval[i],
                                 ov_acq_interval_offset[i], ov_wd_stig_xy[i],
                                 ov_vp_file_paths[i], debris_detection_area[i])
+            overview.locked = (ov_locked[i] == 1)
+            overview.acquired = (ov_acquired[i] == 1)
+            overview.last_acquisition_timestamp = ov_last_acq_ts[i]
+            overview.last_acquisition_result = ov_last_acq_result[i]
+            overview.acquired_centre_sx_sy = ov_acquired_centre_sx_sy[i]
             self.__overviews.append(overview)
 
         self.use_auto_debris_area = (
@@ -176,7 +214,7 @@ class OverviewManager:
             [ov.frame_size for ov in self.__overviews])
         self.cfg['overviews']['ov_size_selector'] = str(
             [ov.frame_size_selector for ov in self.__overviews])
-        self.cfg['overviews']['ov_pixel_size'] = str(
+        self.cfg['overviews']['ov_pixel_size'] = utils.serialise_list(
             [ov.pixel_size for ov in self.__overviews])
         self.cfg['overviews']['ov_dwell_time'] = str(
             [ov.dwell_time for ov in self.__overviews])
@@ -192,6 +230,19 @@ class OverviewManager:
             [ov.acq_interval_offset for ov in self.__overviews])
         self.cfg['overviews']['ov_viewport_images'] = json.dumps(
             [ov.vp_file_path for ov in self.__overviews])
+        self.cfg['overviews']['ov_locked'] = str(
+            [int(ov.locked) for ov in self.__overviews])
+        self.cfg['overviews']['ov_acquired'] = str(
+            [int(ov.acquired) for ov in self.__overviews])
+        self.cfg['overviews']['ov_last_acq_ts'] = json.dumps(
+            [ov.last_acquisition_timestamp for ov in self.__overviews])
+        self.cfg['overviews']['ov_last_acq_result'] = json.dumps(
+            [ov.last_acquisition_result for ov in self.__overviews])
+        self.cfg['overviews']['ov_acquired_centre_sx_sy'] = json.dumps(
+            utils.convert_numpy_to_list(
+                [ov.acquired_centre_sx_sy for ov in self.__overviews]))
+        self.cfg['overviews']['new_ov_default_active'] = str(
+            self.new_ov_default_active)
         self.cfg['debris']['auto_detection_area'] = str(
             self.use_auto_debris_area)
         self.cfg['debris']['detection_area'] = utils.serialise_list(
@@ -292,7 +343,7 @@ class OverviewManager:
         ov_height_d = ov.frame_size[1] * pixel_size / 1000
         sx, sy = self.cs.convert_d_to_s((x + ov_width_d / 2, y + ov_height_d / 2))
 
-        self.add_new_overview(ov_active=ov.active, centre_sx_sy=(sx, sy), pixel_size=pixel_size,
+        self.add_new_overview(ov_active=self.new_ov_default_active, centre_sx_sy=(sx, sy), pixel_size=pixel_size,
                               frame_size=ov.frame_size, frame_size_selector=ov.frame_size_selector,
                               dwell_time=ov.dwell_time, dwell_time_selector=ov.dwell_time_selector,
                               bit_depth_selector=ov.bit_depth_selector,
@@ -302,9 +353,13 @@ class OverviewManager:
         """Provide overview location (upper left corner of overview) in nanometres.
         TODO: What is the best way to deal with overview rotations?
         """
-        dx, dy = self.__overviews[ov_index].centre_dx_dy
-        width_d = self.__overviews[ov_index].width_d()
-        height_d = self.__overviews[ov_index].height_d()
+        ov = self.__overviews[ov_index]
+        centre_sx_sy = ov.centre_sx_sy
+        if ov.acquired_centre_sx_sy is not None:
+            centre_sx_sy = ov.acquired_centre_sx_sy
+        dx, dy = self.cs.convert_s_to_d(centre_sx_sy)
+        width_d = ov.width_d()
+        height_d = ov.height_d()
         return int((dx - width_d/2) * 1000), int((dy - height_d/2) * 1000)
 
     def total_number_active_overviews(self):

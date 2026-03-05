@@ -204,7 +204,13 @@ class SEM_SmartSEM(SEM):
     def has_fcc(self):
         """Return True if FCC (= Focal Charge Compensator) is fitted."""
         if not self.simulation_mode:
-            return "yes" in self.sem_get('DP_CAPCC_FITTED').lower()
+            value = self.sem_get('DP_CAPCC_FITTED')
+            if isinstance(value, str):
+                return "yes" in value.lower()
+            try:
+                return bool(int(value))
+            except (TypeError, ValueError):
+                return bool(value)
         return False
 
     def is_fcc_on(self):

@@ -15,6 +15,9 @@ import os
 import datetime
 import logging
 import threading
+import ast
+import json
+import re
 import cv2
 import numpy as np
 
@@ -500,6 +503,40 @@ def convert_numpy_to_list(data):
 
 def serialise_list(data):
     return str(convert_numpy_to_list(data))
+
+
+def cfg_json_loads(data):
+    """Load JSON values from configuration with legacy repr compatibility."""
+    if not isinstance(data, str):
+        return data
+
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError as decode_error:
+        cleaned = data.strip()
+
+        # Handle legacy numpy scalar reprs such as np.float64(1.23)
+        while True:
+            updated = re.sub(r'np\.[A-Za-z_]\w*\(([^()]+)\)', r'\1', cleaned)
+            if updated == cleaned:
+                break
+            cleaned = updated
+
+        # Handle Python literals that sometimes appear in config values
+        cleaned = re.sub(r'\bNone\b', 'null', cleaned)
+        cleaned = re.sub(r'\bTrue\b', 'true', cleaned)
+        cleaned = re.sub(r'\bFalse\b', 'false', cleaned)
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            python_literal = re.sub(r'\bnull\b', 'None', cleaned)
+            python_literal = re.sub(r'\btrue\b', 'True', python_literal)
+            python_literal = re.sub(r'\bfalse\b', 'False', python_literal)
+            try:
+                return convert_numpy_to_list(ast.literal_eval(python_literal))
+            except (ValueError, SyntaxError):
+                raise decode_error
 
 
 def round_xy(coordinates, digits=3):

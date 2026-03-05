@@ -21,7 +21,12 @@ class Grid(list):
                  acq_interval=1, acq_interval_offset=0,
                  wd_stig_xy=(0, 0, 0), use_wd_gradient=False,
                  wd_gradient_ref_tiles=None,
-                 wd_gradient_params=None):
+                 wd_gradient_params=None,
+                 locked=False,
+                 acquired=False,
+                 last_acquisition_timestamp='',
+                 last_acquisition_result='not_imaged',
+                 acquired_origin_sx_sy=None):
         super().__init__()
         self.cs = coordinate_system
         self.sem = sem
@@ -91,6 +96,13 @@ class Grid(list):
         self.acq_interval_offset = acq_interval_offset
         self.wd_stig_xy = list(wd_stig_xy)
         self.use_wd_gradient = use_wd_gradient
+        self.locked = bool(locked)
+        self.acquired = bool(acquired)
+        self.last_acquisition_timestamp = str(last_acquisition_timestamp)
+        self.last_acquisition_result = str(last_acquisition_result)
+        self.acquired_origin_sx_sy = (
+            None if acquired_origin_sx_sy is None
+            else list(acquired_origin_sx_sy))
         self.initialize_tiles()
         self.update_tile_positions()
         # Restore default for updating tile positions
@@ -109,6 +121,19 @@ class Grid(list):
         self.array_index = None
         self.roi_index = None
         #--------------------------#
+
+    def mark_acquired(self, result='success', timestamp=''):
+        self.acquired = True
+        self.locked = True
+        self.last_acquisition_result = result
+        self.last_acquisition_timestamp = timestamp
+        self.acquired_origin_sx_sy = list(self.origin_sx_sy)
+
+    def mark_not_acquired(self, result='not_imaged', timestamp=''):
+        self.acquired = False
+        self.last_acquisition_result = result
+        self.last_acquisition_timestamp = timestamp
+        self.acquired_origin_sx_sy = None
 
     def get_label(self, grid_index):
         if self.roi_index is not None:
