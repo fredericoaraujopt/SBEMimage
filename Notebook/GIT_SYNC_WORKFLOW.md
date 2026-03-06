@@ -43,7 +43,32 @@ git push -u origin master
 
 ## 4) Routine upstream sync (safe pattern)
 
-### Step A: update local mirror of upstream
+Recommended command (from repository root):
+
+```powershell
+.\Notebook\sync-upstream.ps1 -FeatureBranch feature/guideline-compliance
+```
+
+What this script does:
+- Verifies `origin` and `upstream` remotes exist.
+- Syncs `master` from `upstream/master` with fast-forward only.
+- Pushes `master` to your fork (`origin/master`).
+- Creates `integrate/upstream-YYYY-MM-DD` from your feature branch.
+- Merges `master` into that integration branch.
+
+Useful flags:
+- `-SkipIntegrationBranch`: sync/push only `master`.
+- `-AllowDirty`: only with `-SkipIntegrationBranch`, allows master-only sync with a dirty working tree.
+- `-MasterBranch <name>`: if your default branch is not `master`.
+- `-IntegrationPrefix <prefix>`: customize integration branch naming.
+
+Master-only sync example when you are mid-work and not ready to commit:
+
+```powershell
+.\Notebook\sync-upstream.ps1 -FeatureBranch feature/guideline-compliance -SkipIntegrationBranch -AllowDirty
+```
+
+### Manual fallback: Step A (update local mirror of upstream)
 ```bash
 git fetch upstream
 git switch master
@@ -51,7 +76,7 @@ git merge --ff-only upstream/master
 git push origin master
 ```
 
-### Step B: integrate into customization branch with a checkpoint
+### Manual fallback: Step B (integration checkpoint branch)
 ```bash
 git switch feature/guideline-compliance
 git switch -c integrate/upstream-YYYY-MM-DD

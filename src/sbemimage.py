@@ -46,6 +46,7 @@ import colorama # needed to suppress TIFFReadDirectory warnings in the console
 from configparser import ConfigParser
 from qtpy.QtWidgets import QApplication
 from qtpy.QtCore import Qt, qVersion
+from qtpy.QtGui import QFont
 
 from dialog.ConfigDlg import ConfigDlg
 from config_template import process_cfg, load_device_presets, default_cfg_found
@@ -115,6 +116,7 @@ def main():
         startup_dialog = ConfigDlg()
         startup_dialog.exec()
         dlg_response = startup_dialog.get_ini_file()
+        startup_use_klab_ui = startup_dialog.get_use_klab_ui()
         device_presets_selection = startup_dialog.device_presets_selection
         if dlg_response == 'abort':
             configuration_loaded = False
@@ -255,6 +257,42 @@ def main():
                 import qdarkstyle
                 SBEMimage.setStyleSheet(qdarkstyle.load_stylesheet())
 
+            # Optional KLAB theme for UI palette/font refresh.
+            # To disable and return to native look:
+            # [sys] use_klab_ui = False
+            use_klab_cfg = (
+                config['sys'].get(
+                    'use_klab_ui',
+                    config['sys'].get('use_teal_experiment_gui', 'False')
+                ).lower()
+                == 'true'
+            )
+            use_klab_theme = startup_use_klab_ui if dlg_response != 'abort' else use_klab_cfg
+            if use_klab_theme:
+                theme_path = os.path.abspath(
+                    os.path.join(
+                        os.path.dirname(__file__),
+                        '..',
+                        'gui',
+                        'klab.qss'))
+                try:
+                    with open(theme_path, 'r', encoding='utf-8') as f:
+                        SBEMimage.setStyleSheet(f.read())
+                    font_pt = int(config['sys'].get(
+                        'klab_font_pt',
+                        config['sys'].get('teal_experiment_font_pt', '8')))
+                    font_pt = min(max(font_pt, 7), 11)
+                    ui_font = QFont('Segoe UI')
+                    ui_font.setPointSize(font_pt)
+                    SBEMimage.setFont(ui_font)
+                    utils.log_info(
+                        'CTRL',
+                        f'KLAB UI theme loaded from {theme_path}.')
+                except Exception as e:
+                    utils.log_warning(
+                        'CTRL',
+                        f'Could not load KLAB UI theme: {e}')
+
             print('Please wait while SBEMimage is starting up...\n')
 
             # Launch Main Controls window. The Viewport window (see Viewport.py)
@@ -262,7 +300,8 @@ def main():
             try:
                 SBEMimage_main_window = MainControls(config,
                                                      sysconfig,
-                                                     config_file)
+                                                     config_file,
+                                                     use_klab_ui=use_klab_theme)
                 sys.exit(SBEMimage.exec())
             except Exception as e:
                 print('\nAn exception occurred during this SBEMimage session:\n' + str(e))

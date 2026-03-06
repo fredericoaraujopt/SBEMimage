@@ -83,6 +83,11 @@ class Acquisition:
         # pause_state:
         # 1 -> pause immediately, 2 -> pause after completing current slice
         self.pause_state = None
+        # acq_in_progress/run_mode track active acquisition loops.
+        # run_mode is "stack" for Main Controls stack acquisition and may be
+        # set to other modes by manual viewport workflows.
+        self.acq_in_progress = False
+        self.acq_run_mode = None
         self.acq_paused = (self.cfg['acq']['paused'].lower() == 'true')
         self.stack_completed = False
         self.report_requested = False
@@ -627,12 +632,17 @@ class Acquisition:
 
     def run(self):
         # override exception catching to reset GUI on error
+        self.acq_in_progress = True
+        self.acq_run_mode = 'stack'
         try:
             self.run_acquisition()
         except:
             utils.log_exception("Exception")
             # Reset GUI
             self.main_controls_trigger.transmit('ACQ NOT IN PROGRESS')
+        finally:
+            self.acq_in_progress = False
+            self.acq_run_mode = None
 
     def run_acquisition(self):
         """Run acquisition in a thread started from MainControls.py."""
@@ -1880,7 +1890,7 @@ class Acquisition:
                 if (
                     num_active_tiles > 0
                     and self.pause_state != 1
-                    and self.error_state == Error.none,
+                    and self.error_state == Error.none
                 ):
 
                     if grid_index in self.grids_acquired:
@@ -2040,6 +2050,8 @@ class Acquisition:
                 not tile_accepted
                 and not tile_skipped
                 and fail_counter < 2
+                and self.error_state == Error.none
+                and self.pause_state != 1
             ):
 
                 (tile_img, relative_save_path, save_path,
@@ -3150,6 +3162,12 @@ class Acquisition:
         if previous_img is None or current_img is None:
             return True
         if expected_shift_px < 5:
+            return True
+        min_dim_px = float(min(previous_img.shape[0], previous_img.shape[1],
+                               current_img.shape[0], current_img.shape[1]))
+        # Correlation-based shift estimates become unreliable when overlap is low.
+        # Skip sanity checks for large expected moves to avoid false acquisition stops.
+        if expected_shift_px > (0.75 * min_dim_px):
             return True
         prev_std = float(np.std(previous_img))
         curr_std = float(np.std(current_img))

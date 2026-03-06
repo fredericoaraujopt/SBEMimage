@@ -1,7 +1,8 @@
 import os
-from qtpy.QtCore import Qt
+from configparser import ConfigParser
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QPixmap
-from qtpy.QtWidgets import QDialog, QMessageBox
+from qtpy.QtWidgets import QDialog, QMessageBox, QCheckBox, QLabel
 from qtpy.uic import loadUi
 
 import utils
@@ -35,6 +36,32 @@ class ConfigDlg(QDialog):
         self.label_website.setText('<a href="https://github.com/SBEMimage">'
                                    'https://github.com/SBEMimage</a>')
         self.label_website.setOpenExternalLinks(True)
+        self.checkBox_useKlabUi = QCheckBox('klab gui')
+        self.checkBox_useKlabUi.setToolTip(
+            'Toggle experimental KLAB styling for this session startup.')
+        self.labelKlabAnim = QLabel('')
+        self.labelKlabAnim.setVisible(False)
+        self.labelKlabAnim.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.labelKlabAnim.setWordWrap(True)
+        self.labelKlabAnim.setStyleSheet('font-family: Consolas, monospace;')
+        self.klab_anim_frames = [
+            "  \\  /\n<(o )___\n  /  \\",
+            "   --\n<(o )___\n   --",
+            "  /  \\\n<(o )___\n  \\  /",
+            "   --\n<(o )___\n   --",
+        ]
+        self.klab_anim_index = 0
+        self.klab_anim_timer = QTimer(self)
+        self.klab_anim_timer.setInterval(150)
+        self.klab_anim_timer.timeout.connect(self._animate_klab_label)
+        self.checkBox_useKlabUi.toggled.connect(
+            self._update_klab_animation_state)
+        self.gridLayout.addWidget(self.checkBox_useKlabUi, 6, 0)
+        self.gridLayout.addWidget(self.labelKlabAnim, 7, 0)
+        self.gridLayout.addWidget(self.buttonBox, 8, 0)
+        self.checkBox_useKlabUi.setChecked(False)
+        self._update_klab_animation_state(self.checkBox_useKlabUi.isChecked())
+        self.adjustSize()
         self.show()
         self.abort = False
         # Connect button to load device selection dialog
@@ -92,13 +119,49 @@ class ConfigDlg(QDialog):
                 'message(s) shown in the Console window: '
                 'https://github.com/SBEMimage/SBEMimage/issues',
                 QMessageBox.Ok)
+        self.ini_file_selection_changed()
 
     def ini_file_selection_changed(self):
         # Enable device presets selection button if default.ini selected
-        if self.listWidget_filelist.currentItem().text() == 'Default Configuration':
+        current_item = self.listWidget_filelist.currentItem()
+        if current_item is None:
+            return
+        if current_item.text() == 'Default Configuration':
             self.pushButton_deviceSelection.setEnabled(True)
         else:
             self.pushButton_deviceSelection.setEnabled(False)
+        self._sync_klab_toggle_with_selected_config()
+
+    def _selected_ini_path(self):
+        current_item = self.listWidget_filelist.currentItem()
+        if current_item is None:
+            return None
+        if current_item.text() == 'Default Configuration':
+            return os.path.join('src', 'default_cfg', 'default.ini')
+        return os.path.join('cfg', current_item.text())
+
+    def _sync_klab_toggle_with_selected_config(self):
+        selected_path = self._selected_ini_path()
+        use_klab_ui = False
+        if selected_path and os.path.isfile(selected_path):
+            try:
+                cfg = ConfigParser()
+                with open(selected_path, 'r') as file:
+                    cfg.read_file(file)
+                if 'sys' in cfg:
+                    if 'use_klab_ui' in cfg['sys']:
+                        use_klab_ui = (
+                            cfg['sys']['use_klab_ui'].strip().lower()
+                            == 'true')
+                    elif 'use_teal_experiment_gui' in cfg['sys']:
+                        # Backward compatibility with earlier experimental key.
+                        use_klab_ui = (
+                            cfg['sys']['use_teal_experiment_gui'].strip().lower()
+                            == 'true')
+            except Exception:
+                # Keep current default if selected file cannot be parsed.
+                pass
+        self.checkBox_useKlabUi.setChecked(use_klab_ui)
 
     def open_device_selection_dlg(self):
         dialog = DeviceSelectionDlg(self.load_presets_enabled,
@@ -106,6 +169,23 @@ class ConfigDlg(QDialog):
         if dialog.exec():
             self.device_presets_selection = dialog.selected_presets
             self.load_presets_enabled = dialog.presets_enabled
+
+    def _update_klab_animation_state(self, enabled):
+        if enabled:
+            self.klab_anim_index = 0
+            self.labelKlabAnim.setText(self.klab_anim_frames[self.klab_anim_index])
+            self.labelKlabAnim.setVisible(True)
+            if not self.klab_anim_timer.isActive():
+                self.klab_anim_timer.start()
+        else:
+            self.klab_anim_timer.stop()
+            self.labelKlabAnim.clear()
+            self.labelKlabAnim.setVisible(False)
+
+    def _animate_klab_label(self):
+        self.klab_anim_index = (
+            self.klab_anim_index + 1) % len(self.klab_anim_frames)
+        self.labelKlabAnim.setText(self.klab_anim_frames[self.klab_anim_index])
 
     def reject(self):
         self.abort = True
@@ -116,3 +196,6 @@ class ConfigDlg(QDialog):
             return self.listWidget_filelist.currentItem().text()
         else:
             return 'abort'
+
+    def get_use_klab_ui(self):
+        return self.checkBox_useKlabUi.isChecked()

@@ -31,7 +31,7 @@ from time import sleep
 
 from qtpy.QtWidgets import QApplication, QMainWindow, QMessageBox, QInputDialog, QLineEdit, \
                             QAbstractItemView, QPushButton, QProgressDialog, QFileDialog, QHeaderView, \
-                            QAction, QToolBar
+                            QAction
 from qtpy.QtCore import Qt, QRect, QSize, QEvent, QItemSelection, QItemSelectionModel
 from qtpy.QtGui import QIcon, QPalette, QColor, QPixmap, QKeyEvent, \
                         QStatusTipEvent, QStandardItem, QStandardItemModel
@@ -97,12 +97,13 @@ from dialog.array.ArrayCalibrationDlg import ArrayCalibrationDlg
 
 class MainControls(QMainWindow):
 
-    def __init__(self, config, sysconfig, config_file):
+    def __init__(self, config, sysconfig, config_file, use_klab_ui=False):
         super().__init__()
         self.cfg = config
         self.syscfg = sysconfig
         self.cfg_file = config_file
         self.syscfg_file = self.cfg['sys']['sys_config_file']
+        self.use_klab_ui = use_klab_ui
 
         # Show progress bar in console during start-up. The percentages are
         # just estimates, but helpful for user to see that initialization
@@ -394,7 +395,8 @@ class MainControls(QMainWindow):
         self.viewport = Viewport(self.cfg, self.sem, self.stage, self.cs,
                                  self.ovm, self.gm, self.imported,
                                  self.autofocus, self.acq, self.img_inspector,
-                                 self.trigger, self.tm)
+                                 self.trigger, self.tm,
+                                 use_klab_ui=self.use_klab_ui)
         self.viewport.show()
 
         # Draw the viewport canvas
@@ -499,6 +501,9 @@ class MainControls(QMainWindow):
     def initialize_main_controls_gui(self):
         """Load and set up the Main Controls GUI"""
         loadUi('gui/main_window.ui', self)
+        if self.use_klab_ui:
+            self.apply_klab_main_controls_width_tweak()
+            self.apply_klab_main_controls_geometry_tweaks()
         if 'dev' in VERSION.lower():
             title_str = f'SBEMimage {VERSION} - Main Controls - DEVELOPMENT VERSION'
             # Disable 'Update' function (would overwrite current (local) changes
@@ -628,11 +633,6 @@ class MainControls(QMainWindow):
             self.open_cut_duration_dlg)
         self.actionExport.triggered.connect(self.open_export_dlg)
         self.actionUpdate.triggered.connect(self.open_update_dlg)
-        self.projectToolBar = QToolBar('Project', self)
-        self.projectToolBar.setObjectName('projectToolBar')
-        self.projectToolBar.setMovable(False)
-        self.addToolBar(Qt.TopToolBarArea, self.projectToolBar)
-        self.projectToolBar.addAction(self.actionNewProject)
         # Buttons for testing purposes (third tab)
         self.pushButton_testGetMag.clicked.connect(self.test_get_mag)
         self.pushButton_testSetMag.clicked.connect(self.test_set_mag)
@@ -744,7 +744,179 @@ class MainControls(QMainWindow):
             # self.tabWidget.setTabEnabled(4, False)
             # self.tabWidget.setTabToolTip(4, 'MultiSEM mode under development')
         # #----------------------#
-        
+
+    def apply_klab_main_controls_width_tweak(self):
+        """Increase Main Controls width and distribute it across top panels."""
+        try:
+            extra_width = int(
+                self.cfg['sys'].get('klab_main_controls_extra_width', '48'))
+        except Exception:
+            extra_width = 48
+        extra_width = max(0, min(extra_width, 240))
+        if extra_width == 0:
+            return
+
+        self.resize(self.width() + extra_width, self.height())
+        if self.minimumWidth() > 0:
+            self.setMinimumWidth(self.minimumWidth() + extra_width)
+        if hasattr(self, 'tabWidget') and self.tabWidget.minimumWidth() > 0:
+            self.tabWidget.setMinimumWidth(
+                self.tabWidget.minimumWidth() + extra_width)
+        if hasattr(self, 'gridLayout'):
+            # Main controls top row has 4 columns (SEM/OV/Grid/Manual commands).
+            # Keep stretch uniform so added width is shared evenly.
+            for col in range(4):
+                self.gridLayout.setColumnStretch(col, 1)
+
+    def apply_klab_main_controls_geometry_tweaks(self):
+        """Apply KLAB-only geometry tweaks for fixed-position controls."""
+        if not self.use_klab_ui:
+            return
+
+        self._klab_adjust_selector_with_button(
+            self.groupBox_3,
+            self.comboBox_gridSelector,
+            self.pushButton_gridSettings)
+        self._klab_adjust_selector_with_button(
+            self.groupBox_2,
+            self.comboBox_OVSelector,
+            self.pushButton_OVSettings)
+
+        # Slightly narrower settings buttons free space for selector text.
+        for btn in (self.pushButton_gridSettings, self.pushButton_OVSettings):
+            btn.setFixedWidth(24)
+            btn.setFixedHeight(22)
+        self._klab_adjust_selector_with_button(
+            self.groupBox_3,
+            self.comboBox_gridSelector,
+            self.pushButton_gridSettings)
+        self._klab_adjust_selector_with_button(
+            self.groupBox_2,
+            self.comboBox_OVSelector,
+            self.pushButton_OVSettings)
+
+        # Expand left/right option text lanes in stack acquisition panel.
+        line_x = self.line.x() if hasattr(self, 'line') else 335
+        if hasattr(self, 'groupBox_5') and hasattr(self, 'line'):
+            panel_width = self.groupBox_5.width()
+            base_divider_x = 350  # native is 335; keep divider shifted right
+            divider_x = max(345, min(base_divider_x, panel_width - 250))
+            self.line.move(divider_x, self.line.y())
+            line_x = self.line.x()
+        right_col_text_x = min(
+            self.checkBox_mirrorDrive.x(),
+            self.checkBox_monitorTiles.x(),
+            self.checkBox_useAutofocus.x(),
+            self.checkBox_plasmaCleaner.x(),
+            self.checkBox_useTCP.x())
+        inter_col_gap = 16
+        left_btn_preferred_x = (
+            line_x - self.toolButton_monitoringSettings.width() - 8)
+        left_btn_max_from_right_col = (
+            right_col_text_x
+            - self.toolButton_monitoringSettings.width()
+            - inter_col_gap)
+        left_btn_x = min(left_btn_preferred_x, 164, left_btn_max_from_right_col)
+        left_btn_x = max(126, left_btn_x)
+        for btn in (
+                self.toolButton_monitoringSettings,
+                self.toolButton_OVSettings,
+                self.toolButton_debrisDetection,
+                self.toolButton_askUserMode):
+            btn.move(left_btn_x, btn.y())
+        for cb in (
+                self.checkBox_useMonitoring,
+                self.checkBox_takeOV,
+                self.checkBox_useDebrisDetection,
+                self.checkBox_askUser):
+            cb_width = max(132, left_btn_x - cb.x() - 4)
+            cb.setGeometry(cb.x(), cb.y(), cb_width, cb.height())
+
+        right_btn_x = min(
+            line_x - self.toolButton_mirrorDrive.width() - 4, 330)
+        for btn in (
+                self.toolButton_mirrorDrive,
+                self.toolButton_monitorTiles,
+                self.toolButton_autofocus,
+                self.toolButton_plasmaCleaner,
+                self.toolButton_TCPSettings):
+            btn.move(right_btn_x, btn.y())
+        right_col_gap = 16
+        for cb in (
+                self.checkBox_mirrorDrive,
+                self.checkBox_monitorTiles,
+                self.checkBox_useAutofocus,
+                self.checkBox_plasmaCleaner,
+                self.checkBox_useTCP):
+            cb_width = max(104, right_btn_x - cb.x() - right_col_gap)
+            cb.setGeometry(cb.x(), cb.y(), cb_width, cb.height())
+
+        # Restore native-like right-side spacing, shifted with the divider.
+        if hasattr(self, 'groupBox_5'):
+            native_divider_x = 335
+            shift = line_x - native_divider_x
+            panel_width = self.groupBox_5.width()
+            right_margin = 10
+
+            # (widget, native_x, native_w)
+            right_items = (
+                (self.label_dose_3, 360, 131),
+                (self.label_dose, 500, 171),
+                (self.label_dimensions_2, 360, 121),
+                (self.label_totalArea, 360, 111),
+                (self.label_6, 560, 71),
+                (self.label_totalData, 560, 91),
+                (self.label, 360, 301),
+                (self.label_totalDuration, 360, 301),
+                (self.label_2, 360, 301),
+                (self.label_dateEstimate, 360, 301),
+                (self.progressBar, 360, 291),
+                (self.label_cp, 360, 91),
+                (self.label_currentPosition, 450, 201),
+            )
+            for widget, native_x, native_w in right_items:
+                x = native_x + shift
+                w = min(native_w, max(90, panel_width - right_margin - x))
+                widget.setGeometry(x, widget.y(), w, widget.height())
+
+        # Center manual commands panel buttons horizontally.
+        panel_width = self.groupBox_8.width()
+        for btn in (
+                self.pushButton_doApproach,
+                self.pushButton_doSweep,
+                self.pushButton_grabFrame,
+                self.pushButton_saveViewport,
+                self.pushButton_EHTToggle):
+            btn_x = max(10, int((panel_width - btn.width()) / 2))
+            btn.move(btn_x, btn.y())
+
+        pair_gap = 6
+        pair_width = (self.pushButton_VP.width()
+                      + self.pushButton_FCC.width()
+                      + pair_gap)
+        pair_start_x = max(10, int((panel_width - pair_width) / 2))
+        self.pushButton_VP.move(pair_start_x, self.pushButton_VP.y())
+        self.pushButton_FCC.move(
+            pair_start_x + self.pushButton_VP.width() + pair_gap,
+            self.pushButton_FCC.y())
+
+    def _klab_adjust_selector_with_button(self, group_box, combo_box, button):
+        """Resize selector combo and keep settings button docked right."""
+        left_x = combo_box.x()
+        gap = 4
+        right_margin = 4
+        new_button_x = group_box.width() - right_margin - button.width()
+        max_combo_width = max(92, new_button_x - gap - left_x)
+        new_combo_width = max_combo_width
+        combo_box.setGeometry(
+            left_x, combo_box.y(), new_combo_width, combo_box.height())
+        button.move(new_button_x, button.y())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.use_klab_ui and hasattr(self, 'groupBox_8'):
+            self.apply_klab_main_controls_geometry_tweaks()
+
     def tab_changed(self, index):
         if self.previous_tab_index == 3:
             # moved away from Array tab
@@ -769,13 +941,18 @@ class MainControls(QMainWindow):
             self.gm.template_grid_index = 0
         self.comboBox_gridSelector.blockSignals(True)
         self.comboBox_gridSelector.clear()
+        if self.use_klab_ui:
+            self.comboBox_gridSelector.setIconSize(QSize(14, 8))
         grid_list_str = self.gm.grid_selector_list()
         for i in range(self.gm.number_grids):
-            colour_icon = QPixmap(18, 9)
+            icon_w = 14 if self.use_klab_ui else 18
+            icon_h = 8 if self.use_klab_ui else 9
+            colour_icon = QPixmap(icon_w, icon_h)
             rgb = self.gm[i].display_colour_rgb()
             colour_icon.fill(QColor(*rgb))
+            label_prefix = ' ' if self.use_klab_ui else '   '
             self.comboBox_gridSelector.addItem(
-                QIcon(colour_icon), '   ' + grid_list_str[i])
+                QIcon(colour_icon), label_prefix + grid_list_str[i])
         self.grid_index_dropdown = grid_index
         self.comboBox_gridSelector.setCurrentIndex(grid_index)
         self.comboBox_gridSelector.blockSignals(False)
@@ -2095,6 +2272,9 @@ class MainControls(QMainWindow):
                 'Busy.', 'Stub overview acquisition in progress...', True)
         elif msg == 'STATUS BUSY STAGE MOVE':
             self.set_status('Busy.', 'Stage move in progress...', True)
+        elif msg == 'STATUS BUSY GRID':
+            self.set_status(
+                'Busy.', 'Viewport grid acquisition in progress...', True)
         elif msg == 'STATUS BUSY GRAB IMAGE':
             self.set_status(
                 'Busy.', 'Acquisition of single image in progress...', True)
@@ -2135,6 +2315,8 @@ class MainControls(QMainWindow):
             self.viewport.restrict_gui(True)
         elif msg == 'UNRESTRICT GUI':
             self.restrict_gui(False)
+        elif msg == 'PAUSE ACQ':
+            self.pause_acquisition()
         elif msg == 'SHOW MSG':
             text = args[0] if args else ''
             QMessageBox.information(self,
@@ -2318,8 +2500,6 @@ class MainControls(QMainWindow):
         self.pushButton_resetAcq.setEnabled(idle)
         # Disable/enable menu
         self.menubar.setEnabled(idle)
-        if hasattr(self, 'projectToolBar'):
-            self.projectToolBar.setEnabled(idle)
         # Restrict GUI (microtome-specific functionality) if no microtome used
         if not self.use_microtome or self.syscfg['device']['microtome'] == '6':
             self.restrict_gui_for_sem_stage()
@@ -2747,14 +2927,25 @@ class MainControls(QMainWindow):
         slice.
         """
         if not self.acq.acq_paused:
+            viewport_grid_mode = (self.acq.acq_run_mode == 'viewport_grid')
             dialog = PauseDlg()
             dialog.exec()
             pause_type = dialog.pause_type
             if pause_type == 1 or pause_type == 2:
+                if (pause_type == 2
+                    and self.acq.acq_run_mode == 'viewport_grid'):
+                    # Viewport grid acquisition is a single-pass run without
+                    # a slice loop; treat "pause after slice" as immediate.
+                    pause_type = 1
+                    utils.log_info(
+                        'CTRL',
+                        'Viewport grid acquisition: applying immediate pause.')
                 utils.log_info('CTRL', 'PAUSE command received.')
-                self.pushButton_pauseAcq.setEnabled(False)
+                if not viewport_grid_mode:
+                    self.pushButton_pauseAcq.setEnabled(False)
                 self.acq.pause_acquisition(pause_type)
-                self.pushButton_startAcq.setText('CONTINUE')
+                if not viewport_grid_mode:
+                    self.pushButton_startAcq.setText('CONTINUE')
                 QMessageBox.information(
                     self, 'Acquisition being paused',
                     'Please wait until the pause status is confirmed in '

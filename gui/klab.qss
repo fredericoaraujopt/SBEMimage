@@ -1,0 +1,318 @@
+/* KLAB UI theme
+   Teal + card styling with compact metrics for fixed-size Qt layouts.
+*/
+
+QMainWindow, QDialog {
+    background-color: #084C61;
+    color: #F2FBFF;
+}
+
+QWidget {
+    font-family: "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif;
+}
+
+/* Slightly smaller typography in Main Controls panels to avoid clipping. */
+QWidget#mainControls QGroupBox QLabel,
+QWidget#mainControls QGroupBox QCheckBox,
+QWidget#mainControls QGroupBox QRadioButton,
+QWidget#mainControls QGroupBox QPushButton,
+QWidget#mainControls QGroupBox QToolButton,
+QWidget#mainControls QGroupBox QLineEdit,
+QWidget#mainControls QGroupBox QComboBox,
+QWidget#mainControls QGroupBox QSpinBox,
+QWidget#mainControls QGroupBox QDoubleSpinBox,
+QWidget#mainControls QGroupBox QDateTimeEdit {
+    font-size: 11px;
+}
+
+QWidget#mainControls QGroupBox::title {
+    font-size: 11px;
+    font-weight: 600;
+}
+
+/* Dark-surface readability */
+QMainWindow QLabel, QMainWindow QCheckBox, QMainWindow QRadioButton,
+QDialog QLabel, QDialog QCheckBox, QDialog QRadioButton {
+    color: #F2FBFF;
+}
+
+QMenuBar {
+    background-color: rgba(2, 43, 58, 0.86);
+    color: #F2FBFF;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+QMenuBar::item {
+    background: transparent;
+    padding: 2px 6px;
+}
+
+QMenuBar::item:selected {
+    background-color: rgba(255, 255, 255, 0.16);
+    color: #F2FBFF;
+    border-radius: 5px;
+}
+
+QMenu {
+    background-color: rgba(255, 255, 255, 0.98);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+}
+
+QMenu::item {
+    padding: 3px 8px;
+    color: #022B3A;
+}
+
+QMenu::item:selected {
+    background-color: rgba(8, 76, 97, 0.16);
+    color: #022B3A;
+    border-radius: 5px;
+}
+
+QMenu::item:disabled {
+    color: rgba(2, 43, 58, 0.44);
+    background: transparent;
+}
+
+QMenu::item:selected:disabled {
+    color: rgba(2, 43, 58, 0.44);
+    background: rgba(8, 76, 97, 0.08);
+}
+
+QToolTip {
+    background-color: rgba(255, 255, 255, 0.98);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.25);
+}
+
+QStatusBar {
+    background-color: rgba(2, 43, 58, 0.90);
+    color: #F2FBFF;
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+QToolBar {
+    background-color: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 8px;
+    spacing: 2px;
+    padding: 1px;
+}
+
+/* Card surfaces */
+QGroupBox {
+    background-color: rgba(255, 255, 255, 0.95);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 10px;
+    margin-top: 11px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 9px;
+    padding: 0 3px;
+    color: #022B3A;
+    background-color: rgba(255, 255, 255, 0.98);
+}
+
+QGroupBox QLabel, QGroupBox QCheckBox, QGroupBox QRadioButton {
+    color: #022B3A;
+}
+
+QTabWidget::pane {
+    background-color: rgba(255, 255, 255, 0.95);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 10px;
+}
+
+QTabBar::tab {
+    background-color: rgba(255, 255, 255, 0.80);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 2px 7px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: rgba(255, 255, 255, 0.98);
+    font-weight: 600;
+}
+
+QPushButton {
+    background-color: rgba(255, 255, 255, 0.94);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 8px;
+    padding: 2px 6px;
+    min-height: 17px;
+}
+
+QPushButton:hover {
+    background-color: rgba(255, 255, 255, 1.0);
+}
+
+QPushButton:pressed {
+    background-color: rgba(8, 76, 97, 0.16);
+}
+
+QPushButton:disabled {
+    color: rgba(2, 43, 58, 0.48);
+    background-color: rgba(255, 255, 255, 0.66);
+}
+
+/* Compact toolbutton style to keep "..." visible in 25x19 buttons */
+QToolButton {
+    background-color: rgba(255, 255, 255, 0.94);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 6px;
+    padding: 0px 1px;
+    min-width: 22px;
+    min-height: 18px;
+    margin: 1px 0px;
+}
+
+QToolButton:hover {
+    background-color: rgba(255, 255, 255, 1.0);
+}
+
+QToolButton:pressed {
+    background-color: rgba(8, 76, 97, 0.16);
+}
+
+QLineEdit, QTextEdit, QPlainTextEdit,
+QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {
+    background-color: rgba(255, 255, 255, 0.96);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 8px;
+    padding: 1px 5px;
+    selection-background-color: rgba(8, 76, 97, 0.30);
+}
+
+/* Keep native dropdown arrow, but modernize field styling for KLAB. */
+QComboBox {
+    background-color: rgba(255, 255, 255, 0.99);
+    border: 1px solid rgba(2, 43, 58, 0.30);
+    padding-left: 5px;
+    padding-right: 6px;
+}
+
+QComboBox:hover {
+    border-color: rgba(8, 76, 97, 0.55);
+    background-color: rgba(255, 255, 255, 1.0);
+}
+
+QComboBox:focus {
+    border-color: rgba(8, 76, 97, 0.70);
+}
+
+QComboBox::drop-down {
+    width: 16px;
+    border: none;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    image: url("gui/klab_dropdown_arrow_down.svg");
+    width: 7px;
+    height: 5px;
+    margin-right: 4px;
+}
+
+QComboBox::down-arrow:disabled {
+    image: url("gui/klab_dropdown_arrow_down.svg");
+}
+
+QComboBox:disabled {
+    color: rgba(2, 43, 58, 0.48);
+    background-color: rgba(255, 255, 255, 0.70);
+    border-color: rgba(2, 43, 58, 0.18);
+}
+
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    border: none;
+    background: transparent;
+}
+
+QCheckBox, QRadioButton {
+    spacing: 5px;
+}
+
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 13px;
+    height: 13px;
+}
+
+QCheckBox::indicator {
+    border: 1px solid rgba(2, 43, 58, 0.34);
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.96);
+}
+
+QCheckBox::indicator:checked {
+    background: rgba(8, 76, 97, 0.84);
+}
+
+QRadioButton::indicator {
+    border: 1px solid rgba(2, 43, 58, 0.34);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.96);
+}
+
+QRadioButton::indicator:checked {
+    background: rgba(8, 76, 97, 0.84);
+}
+
+QTableView, QTreeView, QListView, QListWidget, QTableWidget {
+    background-color: rgba(255, 255, 255, 0.96);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 8px;
+    alternate-background-color: rgba(8, 76, 97, 0.06);
+    gridline-color: rgba(2, 43, 58, 0.14);
+}
+
+QHeaderView::section {
+    background-color: rgba(8, 76, 97, 0.16);
+    color: #022B3A;
+    border: 1px solid rgba(2, 43, 58, 0.18);
+    padding: 2px 5px;
+}
+
+QProgressBar {
+    background-color: rgba(255, 255, 255, 0.82);
+    border: 1px solid rgba(2, 43, 58, 0.22);
+    border-radius: 8px;
+    color: #022B3A;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background-color: rgba(8, 76, 97, 0.86);
+    border-radius: 7px;
+}
+
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid rgba(2, 43, 58, 0.16);
+    border-radius: 7px;
+}
+
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: rgba(8, 76, 97, 0.45);
+    border-radius: 6px;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    border: none;
+    background: none;
+}

@@ -48,7 +48,8 @@ class Viewport(QWidget):
     def __init__(self, config, sem, stage, coordinate_system,
                  ov_manager, grid_manager, imported_images,
                  autofocus, acquisition, img_inspector,
-                 main_controls_trigger, template_manager):
+                 main_controls_trigger, template_manager,
+                 use_klab_ui=False):
         super().__init__()
         self.cfg = config
         self.sem = sem
@@ -62,6 +63,7 @@ class Viewport(QWidget):
         self.acq = acquisition
         self.img_inspector = img_inspector
         self.main_controls_trigger = main_controls_trigger
+        self.use_klab_ui = use_klab_ui
 
         # Set Viewport zoom parameters depending on which stage is used for XY
         if self.stage.use_microtome_xy:
@@ -105,6 +107,9 @@ class Viewport(QWidget):
         self.selected_ov = None
         self.selected_imported = None
         self.ov_queue_dlg = None
+        self._vp_grid_acq_in_progress = False
+        self._vp_grid_acq_index = None
+        self._vp_acq_state_backup = None
         self.render_debug_enabled = utils.str_to_bool(
             self.cfg['viewport'].get('render_debug', 'False'))
         self.render_antialias = utils.str_to_bool(
@@ -137,6 +142,8 @@ class Viewport(QWidget):
 
     def _load_gui(self):
         loadUi('gui/viewport.ui', self)
+        if self.use_klab_ui:
+            self.apply_klab_viewport_geometry_tweaks()
         self.setWindowIcon(utils.get_window_icon())
         self.setWindowTitle('SBEMimage - Viewport')
         # Display current settings:
@@ -150,6 +157,90 @@ class Viewport(QWidget):
         # Detect if tab is changed
         self.tabWidget.currentChanged.connect(self.tab_changed)
         self.QLabel_ViewportCanvas.setAttribute(Qt.WA_OpaquePaintEvent, True)
+
+    def apply_klab_viewport_geometry_tweaks(self):
+        """Adjust viewport controls for KLAB theme readability."""
+        combo_margin = 10
+        combo_gap = 8
+        min_selector_width = 96
+        min_secondary_width = 108
+
+        # Frame 1: grid + tile-preview selectors (make "All grids" fully visible).
+        frame1_width = self.frame.width()
+        selector_width = max(
+            min_selector_width,
+            QFontMetrics(self.comboBox_gridSelectorVP.font()).horizontalAdvance(
+                'All grids') + 26)
+        selector_width = min(selector_width, max(min_selector_width, frame1_width - 150))
+        selector_x = combo_margin
+        tile_x = selector_x + selector_width + combo_gap
+        tile_width = max(
+            min_secondary_width,
+            frame1_width - tile_x - combo_margin)
+        self.comboBox_gridSelectorVP.setGeometry(
+            selector_x, self.comboBox_gridSelectorVP.y(),
+            selector_width, self.comboBox_gridSelectorVP.height())
+        self.comboBox_tilePreviewSelectorVP.setGeometry(
+            tile_x, self.comboBox_tilePreviewSelectorVP.y(),
+            tile_width, self.comboBox_tilePreviewSelectorVP.height())
+        self.label_mousePos.setGeometry(
+            combo_margin, self.label_mousePos.y(),
+            max(140, frame1_width - 2 * combo_margin), self.label_mousePos.height())
+
+        # Frame 2: OV selector + action buttons, keep buttons right with fixed gap.
+        frame2_width = self.frame_2.width()
+        ov_selector_width = max(
+            min_selector_width,
+            QFontMetrics(self.comboBox_OVSelectorVP.font()).horizontalAdvance(
+                'All OVs') + 26)
+        ov_selector_width = min(ov_selector_width, 120)
+        self.comboBox_OVSelectorVP.setGeometry(
+            combo_margin, self.comboBox_OVSelectorVP.y(),
+            ov_selector_width, self.comboBox_OVSelectorVP.height())
+        refresh_x = self.comboBox_OVSelectorVP.x() + ov_selector_width + combo_gap
+        self.pushButton_refreshOVs.move(refresh_x, self.pushButton_refreshOVs.y())
+        acquire_x = self.pushButton_refreshOVs.x() + self.pushButton_refreshOVs.width() + combo_gap
+        max_acquire_x = frame2_width - self.pushButton_measureViewport.width() - 2 * combo_gap - self.pushButton_acquireStubOV.width()
+        self.pushButton_acquireStubOV.move(
+            min(acquire_x, max_acquire_x),
+            self.pushButton_acquireStubOV.y())
+        measure_x = frame2_width - self.pushButton_measureViewport.width() - combo_margin
+        self.pushButton_measureViewport.move(measure_x, self.pushButton_measureViewport.y())
+        self.pushButton_updateStagePos.move(measure_x, self.pushButton_updateStagePos.y())
+
+        # Frame 3: ensure labels and stage-position checkbox fit; keep FOV controls separated.
+        frame3_width = self.frame_3.width()
+        check_metrics = QFontMetrics(self.checkBox_showStagePos.font())
+        left_col_width = max(
+            check_metrics.horizontalAdvance('Show stage position') + 26,
+            check_metrics.horizontalAdvance('Show labels') + 26,
+            check_metrics.horizontalAdvance('Show axes') + 26)
+        left_col_width = min(left_col_width, 168)
+        self.checkBox_showAxes.setGeometry(
+            combo_margin, self.checkBox_showAxes.y(),
+            left_col_width, self.checkBox_showAxes.height())
+        self.checkBox_showLabels.setGeometry(
+            combo_margin, self.checkBox_showLabels.y(),
+            left_col_width, self.checkBox_showLabels.height())
+        self.checkBox_showStagePos.setGeometry(
+            combo_margin, self.checkBox_showStagePos.y(),
+            left_col_width, self.checkBox_showStagePos.height())
+        self.pushButton_helpViewport.move(
+            frame3_width - self.pushButton_helpViewport.width() - 8,
+            self.pushButton_helpViewport.y())
+        slider_x = left_col_width + 50
+        slider_width = max(
+            120,
+            self.pushButton_helpViewport.x() - slider_x - 8)
+        self.label_4.move(slider_x - 40, self.label_4.y())
+        self.horizontalSlider_VP.setGeometry(
+            slider_x, self.horizontalSlider_VP.y(),
+            slider_width, self.horizontalSlider_VP.height())
+        self.label_6.move(slider_x, self.label_6.y())
+        self.label_FOVSize.setGeometry(
+            slider_x + 32, self.label_FOVSize.y(),
+            max(90, self.pushButton_helpViewport.x() - (slider_x + 32) - 8),
+            self.label_FOVSize.height())
 
     def tab_changed(self):
         if self.tabWidget.currentIndex() == 2:  # Acquisition monitor
@@ -308,6 +399,8 @@ class Viewport(QWidget):
             self._vp_overview_acq_success(True)
         elif msg == 'REFRESH OV FAILURE':
             self._vp_overview_acq_success(False)
+        elif msg == 'VP GRID ACQ FINISHED':
+            self._vp_grid_acq_finished(*args, **kwargs)
         elif msg == 'STUB OV SUCCESS':
             self._vp_stub_overview_acq_success(True)
         elif msg == 'STUB OV FAILURE':
@@ -872,6 +965,8 @@ class Viewport(QWidget):
         self.cs.update_vp_origin_dx_dy()
         self.vp_canvas = QPixmap(self.cs.vp_width, self.cs.vp_height)
         self.sv_canvas = QPixmap(self.cs.vp_width, self.cs.vp_height)
+        if self.use_klab_ui:
+            self.apply_klab_viewport_geometry_tweaks()
         self.vp_draw()
         self.sv_draw()
 
@@ -1323,12 +1418,18 @@ class Viewport(QWidget):
                 self._vp_toggle_wd_gradient_ref_tile)
 
             menu.addSeparator()
+            action_acquireGrid = None
+            action_acquireTile = None
+            action_pauseAcq = None
             if grid_index is not None:
-                action_image = menu.addAction(f'Acquire Grid {grid_label}')
-                action_image.triggered.connect(self._vp_acquire_grid)
+                action_acquireGrid = menu.addAction(f'Acquire Grid {grid_label}')
+                action_acquireGrid.triggered.connect(self._vp_acquire_grid)
+                action_pauseAcq = menu.addAction('Pause acquisition...')
+                action_pauseAcq.triggered.connect(self._vp_pause_acquisition)
                 if tile_index is not None:
-                    action_image = menu.addAction(f'Acquire Tile {grid_label}.{tile_index}')
-                    action_image.triggered.connect(self._vp_acquire_tile)
+                    action_acquireTile = menu.addAction(
+                        f'Acquire Tile {grid_label}.{tile_index}')
+                    action_acquireTile.triggered.connect(self._vp_acquire_tile)
                     action_registrationCheck = menu.addAction(
                         f'Registration check for {grid_label}.{tile_index}')
                     action_registrationCheck.triggered.connect(
@@ -1504,11 +1605,27 @@ class Viewport(QWidget):
                     action_gridLock.setEnabled(False)
                 if action_ovLock is not None:
                     action_ovLock.setEnabled(False)
+            if action_acquireGrid is not None and self.busy:
+                action_acquireGrid.setEnabled(False)
+            if action_acquireTile is not None and self.busy:
+                action_acquireTile.setEnabled(False)
+            if action_pauseAcq is not None:
+                pause_possible = (
+                    self.acq.acq_in_progress
+                    and self.acq.pause_state not in [1, 2]
+                )
+                action_pauseAcq.setEnabled(pause_possible)
             if self.sem.simulation_mode:
                 action_move.setEnabled(False)
                 action_stub.setEnabled(False)
                 if action_acquireOV is not None:
                     action_acquireOV.setEnabled(False)
+                if action_acquireGrid is not None:
+                    action_acquireGrid.setEnabled(False)
+                if action_acquireTile is not None:
+                    action_acquireTile.setEnabled(False)
+                if action_pauseAcq is not None:
+                    action_pauseAcq.setEnabled(False)
             menu.exec_(self.mapToGlobal(p))
 
     def _vp_get_closest_grid_id(self, sx_sy):
@@ -1540,17 +1657,143 @@ class Viewport(QWidget):
     def _vp_load_selected_in_ft(self):
         self.main_controls_trigger.transmit('LOAD IN FOCUS TOOL')
 
+    def _vp_pause_acquisition(self):
+        if not self.acq.acq_in_progress:
+            QMessageBox.information(
+                self, 'Pause acquisition',
+                'No acquisition is currently in progress.',
+                QMessageBox.Ok)
+            return
+        self.main_controls_trigger.transmit('PAUSE ACQ')
+
+    def _vp_backup_acq_state(self):
+        self._vp_acq_state_backup = {
+            'pause_state': self.acq.pause_state,
+            'acq_paused': self.acq.acq_paused,
+            'acq_interrupted': self.acq.acq_interrupted,
+            'acq_interrupted_at': list(self.acq.acq_interrupted_at),
+            'tiles_acquired': list(self.acq.tiles_acquired),
+            'grids_acquired': list(self.acq.grids_acquired),
+            'error_state': self.acq.error_state,
+            'error_info': self.acq.error_info,
+            'acq_in_progress': self.acq.acq_in_progress,
+            'acq_run_mode': self.acq.acq_run_mode,
+        }
+
+    def _vp_restore_acq_state(self):
+        if self._vp_acq_state_backup is None:
+            return
+        backup = self._vp_acq_state_backup
+        self.acq.pause_state = backup['pause_state']
+        self.acq.acq_paused = backup['acq_paused']
+        self.acq.acq_interrupted = backup['acq_interrupted']
+        self.acq.acq_interrupted_at = list(backup['acq_interrupted_at'])
+        self.acq.tiles_acquired = list(backup['tiles_acquired'])
+        self.acq.grids_acquired = list(backup['grids_acquired'])
+        self.acq.error_state = backup['error_state']
+        self.acq.error_info = backup['error_info']
+        self.acq.acq_in_progress = backup['acq_in_progress']
+        self.acq.acq_run_mode = backup['acq_run_mode']
+        self._vp_acq_state_backup = None
+
+    def _vp_close_manual_acq_logs(self):
+        file_handles = [
+            'main_log_file',
+            'imagelist_file',
+            'imagelist_ov_file',
+            'mirror_imagelist_file',
+            'mirror_imagelist_ov_file',
+            'incident_log_file',
+            'metadata_file',
+        ]
+        for attr in file_handles:
+            handle = getattr(self.acq, attr, None)
+            if handle is not None and not handle.closed:
+                handle.close()
+
+    def _vp_acquire_grid_thread(self, grid_index):
+        outcome = 'error'
+        self.acq.acq_in_progress = True
+        self.acq.acq_run_mode = 'viewport_grid'
+        try:
+            self.acq.reset_error_state()
+            self.acq.pause_state = None
+            self.acq.acq_paused = False
+            self.acq.init_acquisition()
+            self.acq.set_up_acq_subdirectories()
+            self.acq.set_up_acq_logs()
+            if self.acq.error_state == constants.Error.none:
+                self.acq.acquire_grid(grid_index, overwrite=True)
+
+            if self.acq.error_state != constants.Error.none:
+                outcome = 'error'
+            elif self.acq.pause_state in [1, 2]:
+                outcome = 'paused'
+            else:
+                outcome = 'success'
+        except Exception:
+            utils.log_exception('Viewport grid acquisition exception')
+            outcome = 'error'
+        finally:
+            self.acq.acq_in_progress = False
+            self.acq.acq_run_mode = None
+            self.viewport_trigger.transmit('VP GRID ACQ FINISHED', outcome, grid_index)
+
+    def _vp_grid_acq_finished(self, outcome, grid_index):
+        grid_label = self.gm.get_grid_label(grid_index)
+        if outcome == 'success':
+            self._add_to_main_log(
+                f'CTRL: User-requested acquisition of {grid_label} completed.')
+        elif outcome == 'paused':
+            self._add_to_main_log(
+                f'CTRL: User-requested acquisition of {grid_label} paused.')
+        else:
+            self._add_to_main_log(
+                f'CTRL: ERROR occurred during acquisition of {grid_label}.')
+            QMessageBox.warning(
+                self, 'Error during grid acquisition',
+                f'An error occurred while acquiring {grid_label}. '
+                'Please check the log for details.',
+                QMessageBox.Ok)
+
+        self._vp_close_manual_acq_logs()
+        self._vp_restore_acq_state()
+        self._vp_grid_acq_in_progress = False
+        self._vp_grid_acq_index = None
+        self.main_controls_trigger.transmit('UNRESTRICT GUI')
+        self.restrict_gui(False)
+        self.main_controls_trigger.transmit('STATUS IDLE')
+        self.vp_draw()
+
     def _vp_acquire_grid(self):
+        if self.selected_grid is None:
+            return
         if len(self.gm[self.selected_grid].active_tiles) == 0:
             QMessageBox.warning(
                 self, 'No active tiles',
                 'The currently selected grid has no active tiles',
                 QMessageBox.Ok)
-        self.acq.init_acquisition()
-        self.acq.set_up_acq_subdirectories()
-        self.acq.set_up_acq_logs()
-        self.acq.pause_acquisition(2)
-        self.acq.acquire_grid(self.selected_grid, overwrite=True)
+            return
+        if self.busy or self.acq.acq_in_progress:
+            QMessageBox.information(
+                self, 'Operation in progress',
+                'Another operation is currently running. '
+                'Use "Pause acquisition..." from the context menu to pause it first.',
+                QMessageBox.Ok)
+            return
+
+        grid_label = self.gm.get_grid_label(self.selected_grid)
+        self._vp_backup_acq_state()
+        self.acq.acq_in_progress = True
+        self.acq.acq_run_mode = 'viewport_grid'
+        self._vp_grid_acq_in_progress = True
+        self._vp_grid_acq_index = self.selected_grid
+        self._add_to_main_log(
+            f'CTRL: User-requested acquisition of {grid_label} started.')
+        self.restrict_gui(True)
+        self.main_controls_trigger.transmit('RESTRICT GUI')
+        self.main_controls_trigger.transmit('STATUS BUSY GRID')
+        utils.run_log_thread(self._vp_acquire_grid_thread, self.selected_grid)
 
     def _vp_acquire_tile(self):
         active_tiles = self.gm[self.selected_grid].active_tiles
