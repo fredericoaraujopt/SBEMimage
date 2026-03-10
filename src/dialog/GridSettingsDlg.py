@@ -1,3 +1,5 @@
+import numpy as np
+
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QPixmap, QColor, QIcon
 from qtpy.QtWidgets import QDialog, QMessageBox
@@ -75,6 +77,7 @@ class GridSettingsDlg(QDialog):
         self.update_buttons()
         self.show_current_settings()
         self.show_frame_size_and_dose()
+        self.update_polygon_mode()
         if 'multisem' in self.sem.device_name.lower():
             # in multisem ROIs are used instead of grids
             # the smallest possible grid is kept for compatibility
@@ -90,8 +93,9 @@ class GridSettingsDlg(QDialog):
         # If current grid is inactive, disable GUI elements
         b = self.radioButton_active.isChecked()
         tescan_sem = self.sem.device_name.startswith("TESCAN")
-        self.spinBox_rows.setEnabled(b)
-        self.spinBox_cols.setEnabled(b)
+        polygon_grid = self.gm[self.current_grid].has_polygon_roi()
+        self.spinBox_rows.setEnabled(b and not polygon_grid)
+        self.spinBox_cols.setEnabled(b and not polygon_grid)
         self.spinBox_overlap.setEnabled(b)
         self.spinBox_shift.setEnabled(b)
         self.doubleSpinBox_rotation.setEnabled(b)
@@ -103,6 +107,18 @@ class GridSettingsDlg(QDialog):
         self.pushButton_resetFocusParams.setEnabled(b)
         self.spinBox_acqInterval.setEnabled(b)
         self.spinBox_acqIntervalOffset.setEnabled(b)
+        self.update_polygon_mode()
+
+    def update_polygon_mode(self):
+        grid = self.gm[self.current_grid]
+        polygon_grid = grid.has_polygon_roi()
+        tooltip = ''
+        if polygon_grid:
+            tooltip = 'Rows and columns are auto-derived from the polygon ROI.'
+            if grid.is_deferred_polygon_roi():
+                tooltip += ' This ROI is currently deferred and has not been materialized yet.'
+        self.spinBox_rows.setToolTip(tooltip)
+        self.spinBox_cols.setToolTip(tooltip)
 
     def get_settings_from_sem(self):
         """Load current SEM settings for frame size, pixel size, and
@@ -121,8 +137,12 @@ class GridSettingsDlg(QDialog):
             grid.display_colour)
         self.checkBox_focusGradient.setChecked(
             grid.use_wd_gradient)
-        self.spinBox_rows.setValue(grid.number_rows())
-        self.spinBox_cols.setValue(grid.number_cols())
+        if grid.is_deferred_polygon_roi():
+            self.spinBox_rows.setValue(max(1, grid.roi_estimated_rows))
+            self.spinBox_cols.setValue(max(1, grid.roi_estimated_cols))
+        else:
+            self.spinBox_rows.setValue(grid.number_rows())
+            self.spinBox_cols.setValue(grid.number_cols())
         self.spinBox_overlap.setValue(int(grid.overlap))
         self.doubleSpinBox_rotation.setValue(
             grid.rotation)
@@ -139,6 +159,61 @@ class GridSettingsDlg(QDialog):
             grid.acq_interval)
         self.spinBox_acqIntervalOffset.setValue(
             grid.acq_interval_offset)
+
+    def _prompt_polygon_materialization_choice(self, layout, currently_deferred):
+        guardrail = self.gm.polygon_guardrail_state(layout['tile_count'])
+        if not currently_deferred and not guardrail['warn']:
+            return 'materialize'
+
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Warning)
+        if currently_deferred:
+            message_box.setWindowTitle('Deferred polygon ROI')
+            message_box.setText(
+                f'This ROI currently stays deferred. With the current settings it '
+                f'would create approximately {layout["tile_count"]:,} tiles '
+                f'({layout["rows"]} x {layout["cols"]}).')
+            if guardrail['block_materialize']:
+                message_box.setInformativeText(
+                    'This exceeds the safe immediate materialization limit. '
+                    'Keep the ROI deferred and refine the settings further.')
+            else:
+                message_box.setInformativeText(
+                    'You can materialize it now or keep it deferred.')
+        else:
+            message_box.setWindowTitle('Large polygon ROI')
+            message_box.setText(
+                f'These settings would create approximately '
+                f'{layout["tile_count"]:,} tiles '
+                f'({layout["rows"]} x {layout["cols"]}).')
+            if guardrail['block_materialize']:
+                message_box.setInformativeText(
+                    'This exceeds the safe immediate materialization limit. '
+                    'Save the ROI in deferred mode instead.')
+            else:
+                message_box.setInformativeText(
+                    'Large polygon grids can make the GUI slow. '
+                    'Recommended: save this ROI in deferred mode.')
+
+        deferred_button = message_box.addButton(
+            'Keep Deferred', QMessageBox.AcceptRole)
+        if not guardrail['block_materialize']:
+            materialize_button = message_box.addButton(
+                'Materialize Grid', QMessageBox.ActionRole)
+        else:
+            materialize_button = None
+        cancel_button = message_box.addButton(QMessageBox.Cancel)
+        message_box.setDefaultButton(deferred_button)
+        message_box.exec()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button == deferred_button:
+            return 'defer'
+        if materialize_button is not None and clicked_button == materialize_button:
+            return 'materialize'
+        if clicked_button == cancel_button:
+            return 'cancel'
+        return 'cancel'
 
     def show_frame_size_and_dose(self):
         """Calculate and display the tile size and the dose for the current
@@ -167,6 +242,7 @@ class GridSettingsDlg(QDialog):
         self.update_buttons()
         self.show_current_settings()
         self.show_frame_size_and_dose()
+        self.update_polygon_mode()
 
     def update_buttons(self):
         """Update labels on buttons and disable/enable delete button
@@ -259,71 +335,154 @@ class GridSettingsDlg(QDialog):
 
     def save_current_settings(self):
         error_msg = ''
-        # Update tile positions only once after updating all grid attributes
-        self.gm[self.current_grid].auto_update_tile_positions = False
+        grid = self.gm[self.current_grid]
+        polygon_grid = grid.has_polygon_roi()
+        polygon_top_left_dx_dy = None
+        polygon_save_mode = 'materialize'
+        preserve_rectangular_footprint = False
+        rectangular_layout = None
+        frame_size_selector = self.comboBox_tileSize.currentIndex()
+        input_overlap = self.spinBox_overlap.value()
+        input_shift = self.spinBox_shift.value()
+        pixel_size = self.doubleSpinBox_pixelSize.value()
+        frame_size = self.sem.STORE_RES[frame_size_selector]
+        geometry_changed = any([
+            frame_size_selector != grid.frame_size_selector,
+            input_overlap != grid.overlap,
+            input_shift != grid.row_shift,
+            pixel_size != grid.pixel_size,
+        ])
+        requested_size = [self.spinBox_rows.value(), self.spinBox_cols.value()]
+        if polygon_grid:
+            polygon_top_left_dx_dy = (
+                grid.origin_dx_dy[0] - grid.tile_width_d() / 2,
+                grid.origin_dx_dy[1] - grid.tile_height_d() / 2)
+        else:
+            preserve_rectangular_footprint = geometry_changed
+            if preserve_rectangular_footprint:
+                if (not isinstance(grid.sw_sh, (list, tuple))
+                        or len(grid.sw_sh) < 2
+                        or grid.sw_sh[0] <= 0
+                        or grid.sw_sh[1] <= 0):
+                    grid.sw_sh = [float(grid.width_d()), float(grid.height_d())]
+                rectangular_layout = self.gm.polygon_layout_summary(
+                    float(grid.sw_sh[0]),
+                    float(grid.sw_sh[1]),
+                    frame_size,
+                    pixel_size,
+                    input_overlap,
+                    input_shift)
 
         if self.magc_mode:
             # Preserve centre coordinates of MagC grids
-            prev_grid_centre = self.gm[self.current_grid].centre_sx_sy
+            prev_grid_centre = grid.centre_sx_sy
+        else:
+            prev_grid_centre = np.array(grid.centre_sx_sy)
 
-        self.gm[self.current_grid].active = self.radioButton_active.isChecked()
-        self.gm[self.current_grid].size = [self.spinBox_rows.value(),
-                                           self.spinBox_cols.value()]
-        self.gm[self.current_grid].frame_size_selector = (
-            self.comboBox_tileSize.currentIndex())
-        tile_width_p = self.gm[self.current_grid].tile_width_p()
-        input_overlap = self.spinBox_overlap.value()
-        input_shift = self.spinBox_shift.value()
+        tile_width_p = frame_size[0]
         if -0.3 * tile_width_p <= input_overlap < 0.3 * tile_width_p:
-            self.gm[self.current_grid].overlap = input_overlap
+            pass
         else:
             error_msg = ('Overlap outside of allowed '
                          'range (-30% .. 30% frame width).')
         if 0 <= input_shift <= tile_width_p:
-            self.gm[self.current_grid].row_shift = input_shift
+            pass
         else:
             error_msg = ('Row shift outside of allowed '
                          'range (0 .. frame width).')
-        self.gm[self.current_grid].display_colour = (
+        if error_msg:
+            QMessageBox.warning(self, 'Error', error_msg, QMessageBox.Ok)
+            return
+
+        if polygon_grid:
+            layout = self.gm.polygon_layout_summary(
+                grid.sw_sh[0],
+                grid.sw_sh[1],
+                frame_size,
+                pixel_size,
+                input_overlap,
+                input_shift)
+            polygon_save_mode = self._prompt_polygon_materialization_choice(
+                layout,
+                grid.is_deferred_polygon_roi())
+            if polygon_save_mode == 'cancel':
+                return
+
+        # Update tile positions only once after updating all grid attributes
+        grid.auto_update_tile_positions = False
+
+        grid.active = self.radioButton_active.isChecked()
+        if not polygon_grid:
+            if preserve_rectangular_footprint:
+                grid.size = [
+                    rectangular_layout['rows'],
+                    rectangular_layout['cols']]
+            else:
+                grid.size = requested_size
+        grid.frame_size_selector = frame_size_selector
+        grid.overlap = input_overlap
+        grid.row_shift = input_shift
+        grid.display_colour = (
             self.comboBox_colourSelector.currentIndex())
-        self.gm[self.current_grid].use_wd_gradient = (
+        grid.use_wd_gradient = (
             self.checkBox_focusGradient.isChecked())
         if self.checkBox_focusGradient.isChecked():
-            self.gm[self.current_grid].calculate_wd_gradient()
+            grid.calculate_wd_gradient()
         # Acquisition parameters:
-        self.gm[self.current_grid].pixel_size = (
-            self.doubleSpinBox_pixelSize.value())
-        self.gm[self.current_grid].dwell_time_selector = (
+        grid.pixel_size = pixel_size
+        grid.dwell_time_selector = (
             self.comboBox_dwellTime.currentIndex())
-        self.gm[self.current_grid].bit_depth_selector = (
+        grid.bit_depth_selector = (
             self.comboBox_bitDepth.currentIndex())
-        self.gm[self.current_grid].acq_interval = (
+        grid.acq_interval = (
             self.spinBox_acqInterval.value())
-        self.gm[self.current_grid].acq_interval_offset = (
+        grid.acq_interval_offset = (
             self.spinBox_acqIntervalOffset.value())
         # Recalculate tile positions after all parameter updates, except rotation (see below)
-        self.gm[self.current_grid].update_tile_positions()
+        if polygon_grid:
+            if polygon_save_mode == 'defer':
+                self.gm.defer_polygon_grid(
+                    self.current_grid,
+                    layout['rows'],
+                    layout['cols'],
+                    layout['tile_count'])
+            else:
+                self.gm.refresh_polygon_grid(
+                    self.current_grid,
+                    top_left_dx_dy=polygon_top_left_dx_dy)
+        else:
+            grid.update_tile_positions()
+            grid.centre_sx_sy = prev_grid_centre
+            if preserve_rectangular_footprint:
+                grid.sw_sh = [float(grid.sw_sh[0]), float(grid.sw_sh[1])]
+            else:
+                grid.sw_sh = [float(grid.width_d()), float(grid.height_d())]
 
         # Now apply rotation if the rotation angle was changed.
         new_rotation = self.doubleSpinBox_rotation.value()
-        if new_rotation != self.gm[self.current_grid].rotation:
+        if new_rotation != grid.rotation:
           # Get current centre of grid
-          centre_dx, centre_dy = self.gm[self.current_grid].centre_dx_dy
+          centre_dx, centre_dy = grid.centre_dx_dy
           # Set new angle, perform rotation to get new grid origin, and update tile positions
-          self.gm[self.current_grid].rotation = new_rotation
-          self.gm[self.current_grid].rotate_around_grid_centre(centre_dx, centre_dy)
-          self.gm[self.current_grid].update_tile_positions()
+          grid.rotation = new_rotation
+          if polygon_grid and polygon_save_mode == 'defer':
+              grid.update_tile_positions()
+          else:
+              grid.rotate_around_grid_centre(centre_dx, centre_dy)
+              grid.update_tile_positions()
+          if polygon_grid and not grid.is_deferred_polygon_roi():
+              grid.active_tiles = (
+                  self.gm.polygon_active_tiles(grid))
 
-        self.gm[self.current_grid].auto_update_tile_positions = True
+        grid.auto_update_tile_positions = True
 
         if self.magc_mode:
-            self.gm[self.current_grid].centre_sx_sy = prev_grid_centre
+            grid.centre_sx_sy = prev_grid_centre
             self.gm.array_write()
         # Restore default behaviour for updating tile positions
-        if error_msg:
-            QMessageBox.warning(self, 'Error', error_msg, QMessageBox.Ok)
-        else:
-            self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+        self.show_current_settings()
+        self.show_frame_size_and_dose()
+        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
 
     def open_focus_gradient_dlg(self):
         sub_dialog = FocusGradientSettingsDlg(self.gm, self.current_grid)

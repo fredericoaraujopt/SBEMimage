@@ -1027,9 +1027,14 @@ class MainControls(QMainWindow):
         self.label_gridOrigin.setText('X: {0:.3f}'.format(grid_origin[0])
                                       + ', Y: {0:.3f}'.format(grid_origin[1]))
         # Tile grid parameters
-        grid_size = grid.size
-        self.label_gridSize.setText(str(grid_size[0]) + ' × ' +
-                                    str(grid_size[1]))
+        if grid.is_deferred_polygon_roi():
+            self.label_gridSize.setText(
+                f'Deferred ({grid.roi_estimated_rows} × '
+                f'{grid.roi_estimated_cols} est.)')
+        else:
+            grid_size = grid.size
+            self.label_gridSize.setText(str(grid_size[0]) + ' × ' +
+                                        str(grid_size[1]))
         self.label_numberActiveTiles.setText(
             str(grid.number_active_tiles()))
         # Acquisition parameters
@@ -2865,6 +2870,7 @@ class MainControls(QMainWindow):
            clicks on start button. All functionality is contained
            in module stack_acquisition.py
         """
+        self.acq.force_single_surface_overwrite = False
         if (self.acq.slice_counter > self.acq.number_slices
                 and self.acq.number_slices != 0):
             QMessageBox.information(
@@ -2904,22 +2910,35 @@ class MainControls(QMainWindow):
                 'it on before starting the acquisition.',
                 QMessageBox.Ok)
             return False
-        else:
-            self.restrict_gui(True)
-            self.viewport.restrict_gui(True)
-            self.pushButton_startAcq.setText('START')
-            self.pushButton_startAcq.setEnabled(False)
-            self.pushButton_pauseAcq.setEnabled(True)
-            self.pushButton_resetAcq.setEnabled(False)
-            self.show_stack_acq_estimates()
-            # Indicate in GUI that stack is running now
-            self.set_status(
-                'Acquisition in progress', 'Acquisition in progress.', True)
+        elif self.acq.single_surface_output_exists():
+            result = QMessageBox.question(
+                self,
+                'Overwrite single-surface images?',
+                'Image files for the current single-surface acquisition '
+                'already exist in this stack.\nStarting again will overwrite '
+                'the existing files for the active grids'
+                + (' and overviews' if self.acq.take_overviews else '')
+                + '.\nContinue?',
+                QMessageBox.Yes | QMessageBox.No)
+            if result != QMessageBox.Yes:
+                return False
+            self.acq.force_single_surface_overwrite = True
 
-            # Start the thread running the stack acquisition
-            # All source code in stack_acquisition.py
-            # Thread is stopped by either stop or pause button
-            utils.run_log_thread(self.acq.run)
+        self.restrict_gui(True)
+        self.viewport.restrict_gui(True)
+        self.pushButton_startAcq.setText('START')
+        self.pushButton_startAcq.setEnabled(False)
+        self.pushButton_pauseAcq.setEnabled(True)
+        self.pushButton_resetAcq.setEnabled(False)
+        self.show_stack_acq_estimates()
+        # Indicate in GUI that stack is running now
+        self.set_status(
+            'Acquisition in progress', 'Acquisition in progress.', True)
+
+        # Start the thread running the stack acquisition
+        # All source code in stack_acquisition.py
+        # Thread is stopped by either stop or pause button
+        utils.run_log_thread(self.acq.run)
 
     def pause_acquisition(self):
         """Pause the acquisition after user has clicked 'Pause' button. Let

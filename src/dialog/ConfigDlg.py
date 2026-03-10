@@ -45,10 +45,10 @@ class ConfigDlg(QDialog):
         self.labelKlabAnim.setWordWrap(True)
         self.labelKlabAnim.setStyleSheet('font-family: Consolas, monospace;')
         self.klab_anim_frames = [
-            "  \\  /\n<(o )___\n  /  \\",
-            "   --\n<(o )___\n   --",
-            "  /  \\\n<(o )___\n  \\  /",
-            "   --\n<(o )___\n   --",
+            "    (•)>\n  ( <  )\n   <<",
+            "    (•)>\n  ( ^  )\n   >>",
+            "    (•)>\n  (  > )\n   <<",
+            "    (•)>\n  ( ^  )\n   >>",
         ]
         self.klab_anim_index = 0
         self.klab_anim_timer = QTimer(self)
@@ -79,6 +79,7 @@ class ConfigDlg(QDialog):
         for file in os.listdir('cfg'):
             if file.endswith('.ini'):
                 inifile_list.append(file)
+        inifile_list.sort()
         # Create entry "Default Configuration". Selecting it will
         # load default.ini, system.cfg, and presets
         inifile_list.append('Default Configuration')
@@ -90,21 +91,21 @@ class ConfigDlg(QDialog):
         # Which .ini file was used previously? Check in status.dat
         if os.path.isfile('cfg/status.dat'):
             status_file = open('cfg/status.dat', 'r')
-            last_inifile = status_file.readline()
+            last_inifile = status_file.readline().strip()
             status_file.close()
             try:
                 last_item_used = self.listWidget_filelist.findItems(
                     last_inifile, Qt.MatchExactly)[0]
                 self.listWidget_filelist.setCurrentItem(last_item_used)
             except:
-                # If the file indicated in status.dat does not exist, select the
-                # first item of the list
-                self.listWidget_filelist.setCurrentRow(0)
+                # If the file indicated in status.dat does not exist, select
+                # the read-only default configuration.
+                self._select_default_configuration_item()
         else:
             # If status.dat does not exist, the program must have crashed or a
-            # second instance is running. Select the first item of the list
-            # and display a warning.
-            self.listWidget_filelist.setCurrentRow(0)
+            # second instance is running. Select the default configuration and
+            # display a warning.
+            self._select_default_configuration_item()
             QMessageBox.warning(
                 self, 'Warning: Crash occurred or other SBEMimage instance '
                 'is running',
@@ -120,6 +121,14 @@ class ConfigDlg(QDialog):
                 'https://github.com/SBEMimage/SBEMimage/issues',
                 QMessageBox.Ok)
         self.ini_file_selection_changed()
+
+    def _select_default_configuration_item(self):
+        default_items = self.listWidget_filelist.findItems(
+            'Default Configuration', Qt.MatchExactly)
+        if default_items:
+            self.listWidget_filelist.setCurrentItem(default_items[0])
+        elif self.listWidget_filelist.count() > 0:
+            self.listWidget_filelist.setCurrentRow(0)
 
     def ini_file_selection_changed(self):
         # Enable device presets selection button if default.ini selected

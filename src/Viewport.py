@@ -17,6 +17,7 @@
 
 import os
 import shutil
+import json
 import numpy as np
 import scipy
 from time import time, sleep
@@ -24,14 +25,17 @@ from math import log, sqrt, sin, cos, radians
 from statistics import mean
 
 from qtpy.uic import loadUi
-from qtpy.QtWidgets import QWidget, QApplication, QMessageBox, QMenu
+from qtpy.QtWidgets import QWidget, QApplication, QMessageBox, QMenu, \
+                           QFrame, QHBoxLayout, QLabel, QToolButton, \
+                           QFileDialog
 from qtpy.QtGui import QPixmap, QPainter, QColor, QFont, QIcon, QPen, \
-                       QBrush, QKeyEvent, QFontMetrics
+                       QBrush, QKeyEvent, QFontMetrics, QTransform
 from qtpy.QtCore import Qt, QObject, QRect, QRectF, QPointF, QSize
 
 import acq_func
 import constants
 import utils
+import viewport_polygon_roi as polygon_roi
 from image_io import imread
 from dialog.viewport.ModifyImagesDlg import ModifyImagesDlg
 from dialog.viewport.ImportImageDlg import ImportImageDlg
@@ -95,6 +99,18 @@ class Viewport(QWidget):
         self.viewport_trigger = utils.Trigger()
         self.viewport_trigger.signal.connect(self._process_signal)
 
+        # Polygon ROI state must exist before _load_gui() builds the toolbar.
+        self.polygon_shape_library = []
+        self.polygon_tool_buttons = {}
+        self.vp_polygon_tool = None
+        self.vp_polygon_tool_spec = None
+        self.vp_polygon_custom_points = []
+        self.vp_polygon_hover_point = None
+        self.vp_polygon_handle_drag = None
+        self.vp_polygon_vertex_drag = None
+        self.vp_polygon_clipboard = None
+        self.vp_polygon_context_dx_dy = None
+
         self._load_gui()
         # Initialize viewport tabs:
         self._vp_initialize()  # Viewport
@@ -131,6 +147,12 @@ class Viewport(QWidget):
             self.show_saturated_pixels)
         self.cfg['viewport']['render_debug'] = str(self.render_debug_enabled)
         self.cfg['viewport']['render_antialias'] = str(self.render_antialias)
+        self.cfg['viewport']['polygon_shape_library_names'] = json.dumps(
+            [shape['name'] for shape in self.polygon_shape_library])
+        self.cfg['viewport']['polygon_shape_library_points'] = json.dumps(
+            [shape['points_norm'] for shape in self.polygon_shape_library])
+        self.cfg['viewport']['polygon_shape_library_size_um'] = json.dumps(
+            [shape.get('size_um') for shape in self.polygon_shape_library])
 
         self.cfg['viewport']['sv_current_grid'] = str(self.sv_current_grid)
         self.cfg['viewport']['sv_current_tile'] = str(self.sv_current_tile)
@@ -142,6 +164,7 @@ class Viewport(QWidget):
 
     def _load_gui(self):
         loadUi('gui/viewport.ui', self)
+        self._setup_polygon_toolbar()
         if self.use_klab_ui:
             self.apply_klab_viewport_geometry_tweaks()
         self.setWindowIcon(utils.get_window_icon())
@@ -157,6 +180,36 @@ class Viewport(QWidget):
         # Detect if tab is changed
         self.tabWidget.currentChanged.connect(self.tab_changed)
         self.QLabel_ViewportCanvas.setAttribute(Qt.WA_OpaquePaintEvent, True)
+
+    def _setup_polygon_toolbar(self):
+        if hasattr(self, 'frame_polygonTools'):
+            return
+
+        toolbar_height = 32
+        self.resize(self.width(), self.height() + toolbar_height)
+        self.setMinimumHeight(self.minimumHeight() + toolbar_height)
+        self.groupBox.setMinimumHeight(self.groupBox.minimumHeight() + toolbar_height)
+        self.groupBox.setMaximumHeight(self.groupBox.maximumHeight() + toolbar_height)
+        for frame in (self.frame, self.frame_2, self.frame_3):
+            frame.move(frame.x(), frame.y() + toolbar_height)
+
+        self.frame_polygonTools = QFrame(self.groupBox)
+        self.frame_polygonTools.setFrameShape(QFrame.StyledPanel)
+        self.frame_polygonTools.setFrameShadow(QFrame.Raised)
+        self.frame_polygonToolsLayout = QHBoxLayout(self.frame_polygonTools)
+        self.frame_polygonToolsLayout.setContentsMargins(6, 0, 6, 0)
+        self.frame_polygonToolsLayout.setSpacing(4)
+        self._layout_polygon_toolbar()
+        self._rebuild_polygon_toolbar()
+
+    def _layout_polygon_toolbar(self):
+        if not hasattr(self, 'frame_polygonTools'):
+            return
+        self.frame_polygonTools.setGeometry(
+            8,
+            12,
+            max(300, self.groupBox.width() - 16),
+            26)
 
     def apply_klab_viewport_geometry_tweaks(self):
         """Adjust viewport controls for KLAB theme readability."""
@@ -241,6 +294,244 @@ class Viewport(QWidget):
             slider_x + 32, self.label_FOVSize.y(),
             max(90, self.pushButton_helpViewport.x() - (slider_x + 32) - 8),
             self.label_FOVSize.height())
+
+    def _clear_polygon_toolbar_layout(self):
+        while self.frame_polygonToolsLayout.count():
+            item = self.frame_polygonToolsLayout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _rebuild_polygon_toolbar(self):
+        self.polygon_tool_buttons = {}
+        self._clear_polygon_toolbar_layout()
+
+        label = QLabel('ROI')
+        label.setMinimumWidth(26)
+        self.frame_polygonToolsLayout.addWidget(label)
+
+        default_buttons = [
+            ('Rectangle', 'rectangle'),
+            ('Circle', 'circle'),
+            ('Triangle', 'triangle'),
+            ('Draw your own', polygon_roi.CUSTOM_SHAPE_TYPE),
+        ]
+        for text, key in default_buttons:
+            button = QToolButton(self.frame_polygonTools)
+            button.setText(text)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda checked, button_key=key:
+                    self._vp_toggle_polygon_tool(button_key, checked))
+            self.frame_polygonToolsLayout.addWidget(button)
+            self.polygon_tool_buttons[key] = button
+
+        for index, shape in enumerate(self.polygon_shape_library):
+            key = f'imported::{index}'
+            button = QToolButton(self.frame_polygonTools)
+            button.setText(shape['name'])
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda checked, button_key=key:
+                    self._vp_toggle_polygon_tool(button_key, checked))
+            self.frame_polygonToolsLayout.addWidget(button)
+            self.polygon_tool_buttons[key] = button
+
+        self.frame_polygonToolsLayout.addStretch(1)
+
+        import_button = QToolButton(self.frame_polygonTools)
+        import_button.setText('Import')
+        import_button.clicked.connect(self._vp_import_polygon_shape)
+        self.frame_polygonToolsLayout.addWidget(import_button)
+        self.pushButton_importPolygon = import_button
+
+        delete_button = QToolButton(self.frame_polygonTools)
+        delete_button.setText('Delete SVG')
+        delete_button.clicked.connect(self._vp_delete_imported_polygon_shape)
+        delete_button.setEnabled(False)
+        delete_button.setToolTip(
+            'Delete the currently selected imported SVG shape from the ROI toolbar.')
+        self.frame_polygonToolsLayout.addWidget(delete_button)
+        self.pushButton_deleteImportedPolygon = delete_button
+
+        self._sync_polygon_toolbar_buttons()
+
+    def _sync_polygon_toolbar_buttons(self):
+        active_key = None
+        if self.vp_polygon_tool_spec is not None:
+            active_key = self.vp_polygon_tool_spec.get('key')
+        for key, button in self.polygon_tool_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == active_key)
+            button.blockSignals(False)
+        if hasattr(self, 'pushButton_deleteImportedPolygon'):
+            imported_index = self._vp_selected_imported_polygon_index()
+            enabled = imported_index is not None
+            self.pushButton_deleteImportedPolygon.setEnabled(enabled)
+            if enabled:
+                shape_name = self.polygon_shape_library[imported_index]['name']
+                self.pushButton_deleteImportedPolygon.setToolTip(
+                    f'Delete imported SVG shape "{shape_name}" from the ROI toolbar.')
+            else:
+                self.pushButton_deleteImportedPolygon.setToolTip(
+                    'Select an imported SVG shape to delete it from the ROI toolbar.')
+
+    def _vp_selected_imported_polygon_index(self):
+        if self.vp_polygon_tool_spec is None:
+            return None
+        key = self.vp_polygon_tool_spec.get('key')
+        if not isinstance(key, str) or not key.startswith('imported::'):
+            return None
+        try:
+            imported_index = int(key.split('::', 1)[1])
+        except ValueError:
+            return None
+        if 0 <= imported_index < len(self.polygon_shape_library):
+            return imported_index
+        return None
+
+    def _load_polygon_shape_library(self):
+        raw_names = self.cfg['viewport'].get('polygon_shape_library_names', '[]')
+        raw_points = self.cfg['viewport'].get('polygon_shape_library_points', '[]')
+        raw_sizes = self.cfg['viewport'].get('polygon_shape_library_size_um', '[]')
+        try:
+            names = json.loads(raw_names)
+            points_list = json.loads(raw_points)
+            size_list = json.loads(raw_sizes)
+        except Exception:
+            names = []
+            points_list = []
+            size_list = []
+        self.polygon_shape_library = []
+        for index, name in enumerate(names):
+            points_norm = points_list[index] if index < len(points_list) else []
+            if len(points_norm) < 3:
+                continue
+            size_um = size_list[index] if index < len(size_list) else None
+            if (not isinstance(size_um, list)) or len(size_um) != 2:
+                size_um = None
+            elif size_um[0] <= 0 or size_um[1] <= 0:
+                size_um = None
+            self.polygon_shape_library.append({
+                'name': str(name),
+                'points_norm': points_norm,
+                'size_um': size_um,
+            })
+
+    def _vp_tool_spec_from_key(self, key):
+        if key in polygon_roi.PREDEFINED_SHAPE_TYPES:
+            return {
+                'key': key,
+                'shape_type': key,
+                'shape_name': key.title(),
+                'points_norm': polygon_roi.predefined_points_norm(key),
+            }
+        if key == polygon_roi.CUSTOM_SHAPE_TYPE:
+            return {
+                'key': key,
+                'shape_type': polygon_roi.CUSTOM_SHAPE_TYPE,
+                'shape_name': 'Custom polygon',
+                'points_norm': [],
+            }
+        if key.startswith('imported::'):
+            try:
+                index = int(key.split('::', 1)[1])
+            except ValueError:
+                return None
+            if index < 0 or index >= len(self.polygon_shape_library):
+                return None
+            shape = self.polygon_shape_library[index]
+            return {
+                'key': key,
+                'shape_type': polygon_roi.IMPORTED_SHAPE_TYPE,
+                'shape_name': shape['name'],
+                'points_norm': shape['points_norm'],
+                'size_um': shape.get('size_um'),
+            }
+        return None
+
+    def _vp_toggle_polygon_tool(self, key, checked):
+        if not checked:
+            if self.vp_polygon_tool_spec is not None and self.vp_polygon_tool_spec.get('key') == key:
+                self._vp_disarm_polygon_tool()
+            return
+
+        spec = self._vp_tool_spec_from_key(key)
+        if spec is None:
+            self._vp_disarm_polygon_tool()
+            return
+        self.vp_polygon_tool = spec['shape_type']
+        self.vp_polygon_tool_spec = spec
+        self.vp_polygon_custom_points = []
+        self.vp_polygon_hover_point = None
+        self._sync_polygon_toolbar_buttons()
+        self.vp_draw()
+
+    def _vp_disarm_polygon_tool(self):
+        self.vp_polygon_tool = None
+        self.vp_polygon_tool_spec = None
+        self.vp_polygon_custom_points = []
+        self.vp_polygon_hover_point = None
+        self._sync_polygon_toolbar_buttons()
+        self.vp_draw()
+
+    def _vp_import_polygon_shape(self):
+        svg_path, _ = QFileDialog.getOpenFileName(
+            self,
+            'Import polygon SVG',
+            '',
+            'SVG files (*.svg)')
+        if not svg_path:
+            return
+        try:
+            svg_shape = polygon_roi.parse_svg_shape(svg_path)
+            shape_name = polygon_roi.svg_shape_name(svg_path)
+        except Exception as exception:
+            QMessageBox.warning(
+                self,
+                'Import polygon SVG',
+                f'Could not import polygon SVG:\n{exception}',
+                QMessageBox.Ok)
+            return
+
+        self.polygon_shape_library.append({
+            'name': shape_name,
+            'points_norm': svg_shape['points_norm'],
+            'size_um': [
+                float(svg_shape['bounds_um'][2]),
+                float(svg_shape['bounds_um'][3]),
+            ],
+        })
+        self._rebuild_polygon_toolbar()
+        imported_key = f'imported::{len(self.polygon_shape_library) - 1}'
+        self._vp_toggle_polygon_tool(imported_key, True)
+
+    def _vp_delete_imported_polygon_shape(self):
+        imported_index = self._vp_selected_imported_polygon_index()
+        if imported_index is None:
+            return
+        shape_name = self.polygon_shape_library[imported_index]['name']
+        user_reply = QMessageBox.question(
+            self,
+            'Delete imported SVG',
+            f'Remove imported SVG shape "{shape_name}" from the ROI toolbar?\n'
+            'Existing polygon grids already created from this shape will remain unchanged.',
+            QMessageBox.Ok | QMessageBox.Cancel)
+        if user_reply != QMessageBox.Ok:
+            return
+
+        del self.polygon_shape_library[imported_index]
+        self.vp_polygon_tool = None
+        self.vp_polygon_tool_spec = None
+        self.vp_polygon_custom_points = []
+        self.vp_polygon_hover_point = None
+        self._rebuild_polygon_toolbar()
+        self.vp_draw()
+
+    def _vp_visible_sem_dimensions(self):
+        return (
+            self.cs.vp_width / self.cs.vp_scale,
+            self.cs.vp_height / self.cs.vp_scale)
 
     def tab_changed(self):
         if self.tabWidget.currentIndex() == 2:  # Acquisition monitor
@@ -412,6 +703,28 @@ class Viewport(QWidget):
         else:
             self._add_to_main_log(msg)
 
+    def _vp_normalize_selection_state(self):
+        if (self.selected_grid is not None
+                and not (0 <= self.selected_grid < self.gm.number_grids)):
+            self.selected_grid = None
+            self.selected_tile = None
+        elif self.selected_grid is not None and self.selected_tile is not None:
+            grid = self.gm[self.selected_grid]
+            if not (0 <= self.selected_tile < grid.number_tiles):
+                self.selected_tile = None
+
+        if (self.selected_ov is not None
+                and not (0 <= self.selected_ov < self.ovm.number_ov)):
+            self.selected_ov = None
+
+        if (self.selected_imported is not None
+                and not (0 <= self.selected_imported < len(self.imported))):
+            self.selected_imported = None
+
+        if (self.vp_current_grid >= 0
+                and not (0 <= self.vp_current_grid < self.gm.number_grids)):
+            self.vp_current_grid = -1
+
     def _add_to_main_log(self, msg):
         """Add entry to the log in the main window via main_controls_trigger."""
         self.main_controls_trigger.transmit(utils.format_log_entry(msg))
@@ -454,15 +767,75 @@ class Viewport(QWidget):
             self.stage.get_xy()
             self.vp_draw()
 
+        if ((event.button() == Qt.RightButton)
+                and self.tabWidget.currentIndex() == 0
+                and mouse_pos_within_viewer
+                and self.vp_polygon_tool == polygon_roi.CUSTOM_SHAPE_TYPE
+                and self.vp_polygon_custom_points):
+            self._vp_add_custom_polygon_vertex(
+                self.cs.convert_mouse_to_v((px, py)))
+            self.vp_polygon_hover_point = list(
+                self.cs.convert_mouse_to_v((px, py)))
+            self._vp_finalize_custom_polygon()
+            return
+
         if ((event.button() == Qt.LeftButton)
             and (self.tabWidget.currentIndex() < 2)
             and mouse_pos_within_viewer):
+
+            if self.tabWidget.currentIndex() == 0 and self.vp_polygon_tool_spec is not None:
+                if self.vp_polygon_tool == polygon_roi.CUSTOM_SHAPE_TYPE:
+                    point_d = self.cs.convert_mouse_to_v((px, py))
+                    self._vp_add_custom_polygon_vertex(point_d)
+                    self.vp_polygon_hover_point = list(point_d)
+                    self.vp_draw()
+                else:
+                    self._vp_place_shape_from_tool(
+                        self.cs.convert_mouse_to_v((px, py)))
+                return
+
+            if ((self.tabWidget.currentIndex() == 0)
+                    and (QApplication.keyboardModifiers() == Qt.NoModifier)
+                    and not self.busy):
+                hit = self._vp_polygon_handle_hit_test(px, py)
+                if hit is not None:
+                    self.selected_grid = hit[0]
+                    self.selected_tile = None
+                    self.selected_ov = None
+                    self.selected_imported = None
+                    self._vp_begin_polygon_handle_drag(hit[1], hit[2])
+                    self.vp_draw()
+                    return
 
             self.selected_grid, self.selected_tile = \
                 self._vp_grid_tile_mouse_selection(px, py)
             self.selected_ov = self._vp_ov_mouse_selection(px, py)
             self.selected_imported = (
                 self._vp_imported_img_mouse_selection(px, py))
+
+            if ((self.tabWidget.currentIndex() == 0)
+                    and (QApplication.keyboardModifiers() == Qt.NoModifier)
+                    and not self.busy
+                    and self.selected_grid is None
+                    and self.selected_ov is None
+                    and self.selected_imported is None):
+                polygon_grid = self._vp_polygon_body_hit_test(
+                    px, py, allow_large_deferred_interior=False)
+                if polygon_grid is not None:
+                    self.selected_grid = polygon_grid
+                    self.selected_tile = None
+                    self.vp_draw()
+                    return
+
+            if ((self.tabWidget.currentIndex() == 0)
+                    and (QApplication.keyboardModifiers() == Qt.NoModifier)
+                    and self.selected_grid is not None
+                    and self.gm[self.selected_grid].has_polygon_roi()):
+                self.selected_tile = None
+                self.selected_ov = None
+                self.selected_imported = None
+                self.vp_draw()
+                return
 
             # Disable self.selected_template for now (causing runtime warnings)
             # TODO (Benjamin / Philipp): look into this
@@ -548,6 +921,14 @@ class Viewport(QWidget):
                 and (QApplication.keyboardModifiers() == Qt.AltModifier)
                 and self.vp_current_grid >= -2
                 and not self.busy):
+                if self.selected_grid is None:
+                    polygon_grid = self._vp_polygon_body_hit_test(
+                        px, py, allow_large_deferred_interior=False)
+                    if polygon_grid is not None:
+                        self.selected_grid = polygon_grid
+                        self.selected_tile = None
+                        self.selected_ov = None
+                        self.selected_imported = None
                 if self.selected_grid is not None and self.selected_grid >= 0:
                     if self.gm[self.selected_grid].locked:
                         QMessageBox.information(
@@ -655,7 +1036,22 @@ class Viewport(QWidget):
             self.label_mousePos.setText('-')
 
         # Move grid/OV or FOV:
-        if self.grid_drag_active:
+        if self.vp_polygon_handle_drag is not None:
+            self.setCursor(Qt.CrossCursor)
+            self._vp_update_polygon_resize(px, py)
+        elif self.vp_polygon_vertex_drag is not None:
+            self.setCursor(Qt.CrossCursor)
+            self._vp_update_polygon_vertex(px, py)
+        elif (self.tabWidget.currentIndex() == 0
+                and mouse_pos_within_viewer
+                and self.vp_polygon_tool_spec is not None):
+            self.setCursor(Qt.CrossCursor)
+            if self.vp_polygon_tool == polygon_roi.CUSTOM_SHAPE_TYPE:
+                self.vp_polygon_hover_point = list(
+                    self.cs.convert_mouse_to_v((px, py)))
+                if self.vp_polygon_custom_points:
+                    self.vp_draw()
+        elif self.grid_drag_active:
             # Change cursor appearence
             self.setCursor(Qt.SizeAllCursor)
             drag_vector = (px - self.drag_origin[0],
@@ -776,6 +1172,14 @@ class Viewport(QWidget):
             self.doubleclick_registered = False
 
         elif event.button() == Qt.LeftButton:
+            if self.vp_polygon_handle_drag is not None:
+                self.vp_polygon_handle_drag = None
+                self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+                return
+            if self.vp_polygon_vertex_drag is not None:
+                self.vp_polygon_vertex_drag = None
+                self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+                return
             if self.grid_drag_active:
                 user_reply = QMessageBox.question(
                     self, 'Repositioning grid',
@@ -832,8 +1236,16 @@ class Viewport(QWidget):
             if self.grid_draw_active:
                 if h != 0 and w != 0:
                     self.grid_draw_active = False
-                    self.gm.draw_grid(x0, y0, w, h)
-                    self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+                    layout = self.gm.estimate_grid_layout_for_drag(x0, y0, w, h)
+                    creation_mode = (
+                        self._vp_prompt_large_rectangular_grid_creation(layout))
+                    if creation_mode == 'defer':
+                        self._vp_create_deferred_rectangle_roi(
+                            (x0, y0), (w, h), layout)
+                    elif creation_mode == 'materialize':
+                        self.gm.draw_grid(x0, y0, w, h)
+                        self.main_controls_trigger.transmit(
+                            'GRID SETTINGS CHANGED')
 
             if self.ov_draw_active:
                 if h != 0 and w != 0:
@@ -955,11 +1367,23 @@ class Viewport(QWidget):
                 self.sv_slice_fwd()
             elif event.key() == Qt.Key_PageDown:
                 self.sv_slice_bwd()
+        elif (type(event) == QKeyEvent) and (self.tabWidget.currentIndex() == 0):
+            modifiers = event.modifiers()
+            if event.key() == Qt.Key_Escape and self.vp_polygon_tool_spec is not None:
+                self._vp_disarm_polygon_tool()
+            elif event.key() == Qt.Key_Delete:
+                self._vp_delete_selected_polygon()
+            elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_C:
+                self._vp_copy_selected_polygon()
+            elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_V:
+                if self.vp_polygon_clipboard is not None:
+                    self._vp_paste_polygon_at(self.cs.vp_centre_dx_dy)
 
     def resizeEvent(self, event):
         """Adjust the Viewport and Slice-by-slice viewer canvas when the window
         is resized.
         """
+        self._layout_polygon_toolbar()
         self.cs.vp_width = event.size().width() - constants.VP_WINDOW_DIFF_X
         self.cs.vp_height = event.size().height() - constants.VP_WINDOW_DIFF_Y
         self.cs.update_vp_origin_dx_dy()
@@ -969,6 +1393,541 @@ class Viewport(QWidget):
             self.apply_klab_viewport_geometry_tweaks()
         self.vp_draw()
         self.sv_draw()
+
+    def _vp_polygon_layout_summary(self, size):
+        if self.gm.template_grid_index >= self.gm.number_grids:
+            self.gm.template_grid_index = 0
+        template_grid = self.gm[self.gm.template_grid_index]
+        return self.gm.polygon_layout_summary(
+            float(size[0]),
+            float(size[1]),
+            template_grid.frame_size,
+            template_grid.pixel_size,
+            template_grid.overlap,
+            template_grid.row_shift)
+
+    def _vp_prompt_large_polygon_creation(self, shape_name, layout):
+        guardrail = self.gm.polygon_guardrail_state(layout['tile_count'])
+        if not guardrail['warn']:
+            return 'materialize'
+
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Warning)
+        message_box.setWindowTitle('Large polygon ROI')
+        shape_label = shape_name or 'Polygon ROI'
+        message_box.setText(
+            f'{shape_label} would create approximately '
+            f'{layout["tile_count"]:,} tiles '
+            f'({layout["rows"]} x {layout["cols"]}).')
+        if guardrail['block_materialize']:
+            message_box.setInformativeText(
+                'This is above the safe immediate materialization limit for the '
+                'viewport. Create it as a deferred ROI instead, then refine '
+                'settings before materializing.')
+        else:
+            message_box.setInformativeText(
+                'Large polygon grids can make the GUI slow. '
+                'Recommended: create a deferred ROI placeholder first.')
+        deferred_button = message_box.addButton(
+            'Create Deferred ROI', QMessageBox.AcceptRole)
+        if not guardrail['block_materialize']:
+            materialize_button = message_box.addButton(
+                'Create Full Grid', QMessageBox.ActionRole)
+        else:
+            materialize_button = None
+        cancel_button = message_box.addButton(QMessageBox.Cancel)
+        message_box.setDefaultButton(deferred_button)
+        message_box.exec()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button == deferred_button:
+            return 'defer'
+        if materialize_button is not None and clicked_button == materialize_button:
+            return 'materialize'
+        if clicked_button == cancel_button:
+            return 'cancel'
+        return 'cancel'
+
+    def _vp_prompt_large_rectangular_grid_creation(self, layout):
+        guardrail = self.gm.polygon_guardrail_state(layout['tile_count'])
+        if not guardrail['warn']:
+            return 'materialize'
+
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Warning)
+        message_box.setWindowTitle('Large rectangular grid')
+        message_box.setText(
+            f'This rectangular grid would create approximately '
+            f'{layout["tile_count"]:,} tiles '
+            f'({layout["rows"]} x {layout["cols"]}).')
+        if guardrail['block_materialize']:
+            message_box.setInformativeText(
+                'This is above the safe immediate materialization limit for the '
+                'viewport. Create a deferred rectangle ROI instead, then refine '
+                'settings before materializing.')
+        else:
+            message_box.setInformativeText(
+                'Large rectangular grids can make the GUI slow. '
+                'Recommended: create a deferred rectangle ROI placeholder first.')
+        deferred_button = message_box.addButton(
+            'Create Deferred ROI', QMessageBox.AcceptRole)
+        if not guardrail['block_materialize']:
+            materialize_button = message_box.addButton(
+                'Create Full Grid', QMessageBox.ActionRole)
+        else:
+            materialize_button = None
+        cancel_button = message_box.addButton(QMessageBox.Cancel)
+        message_box.setDefaultButton(deferred_button)
+        message_box.exec()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button == deferred_button:
+            return 'defer'
+        if materialize_button is not None and clicked_button == materialize_button:
+            return 'materialize'
+        if clicked_button == cancel_button:
+            return 'cancel'
+        return 'cancel'
+
+    def _vp_create_deferred_rectangle_roi(self, top_left_dx_dy, size,
+                                          estimated_layout):
+        grid_index = self.gm.add_new_grid_from_polygon(
+            top_left_dx_dy=top_left_dx_dy,
+            size=size,
+            shape_type='rectangle',
+            points_norm=polygon_roi.predefined_points_norm('rectangle'),
+            shape_name='Rectangle ROI',
+            materialize=False,
+            estimated_layout=estimated_layout)
+        self.selected_grid = grid_index
+        self.selected_tile = None
+        self.vp_current_grid = grid_index
+        self.vp_update_grid_selector()
+        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+        self._add_to_main_log(
+            f'CTRL: Created deferred ROI placeholder for '
+            f'{self.gm.get_grid_label(grid_index)} '
+            f'({estimated_layout["tile_count"]:,} estimated tiles).')
+
+    def _vp_create_polygon_grid(self, shape_type, points_norm, top_left_dx_dy,
+                                size, shape_name=''):
+        layout = self._vp_polygon_layout_summary(size)
+        creation_mode = self._vp_prompt_large_polygon_creation(shape_name, layout)
+        if creation_mode == 'cancel':
+            return
+        grid_index = self.gm.add_new_grid_from_polygon(
+            top_left_dx_dy=top_left_dx_dy,
+            size=size,
+            shape_type=shape_type,
+            points_norm=points_norm,
+            shape_name=shape_name,
+            materialize=(creation_mode == 'materialize'),
+            estimated_layout=layout)
+        self.selected_grid = grid_index
+        self.selected_tile = None
+        self.vp_current_grid = grid_index
+        self.vp_update_grid_selector()
+        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+        if creation_mode == 'defer':
+            self._add_to_main_log(
+                f'CTRL: Created deferred ROI placeholder for '
+                f'{self.gm.get_grid_label(grid_index)} '
+                f'({layout["tile_count"]:,} estimated tiles).')
+        self._vp_disarm_polygon_tool()
+        self.vp_draw()
+
+    def _vp_place_shape_from_tool(self, centre_dx_dy):
+        if self.vp_polygon_tool_spec is None:
+            return
+        shape_type = self.vp_polygon_tool_spec['shape_type']
+        size_um = self.vp_polygon_tool_spec.get('size_um')
+        if (shape_type == polygon_roi.IMPORTED_SHAPE_TYPE
+                and isinstance(size_um, list)
+                and len(size_um) == 2
+                and size_um[0] > 0
+                and size_um[1] > 0):
+            width = float(size_um[0])
+            height = float(size_um[1])
+            top_left_x = float(centre_dx_dy[0] - width / 2)
+            top_left_y = float(centre_dx_dy[1] - height / 2)
+        else:
+            vp_width_d, vp_height_d = self._vp_visible_sem_dimensions()
+            top_left_x, top_left_y, width, height = (
+                polygon_roi.make_default_shape_bounds(
+                    centre_dx_dy[0],
+                    centre_dx_dy[1],
+                    vp_width_d,
+                    vp_height_d,
+                    shape_type))
+        self._vp_create_polygon_grid(
+            shape_type=shape_type,
+            points_norm=self.vp_polygon_tool_spec['points_norm'],
+            top_left_dx_dy=(top_left_x, top_left_y),
+            size=(width, height),
+            shape_name=self.vp_polygon_tool_spec['shape_name'])
+
+    def _vp_finalize_custom_polygon(self):
+        if len(self.vp_polygon_custom_points) < 3:
+            QMessageBox.information(
+                self,
+                'Custom polygon ROI',
+                'Add at least 3 vertices before closing the polygon.',
+                QMessageBox.Ok)
+            return
+        points_norm, bounds = polygon_roi.normalize_points(
+            self.vp_polygon_custom_points)
+        self._vp_create_polygon_grid(
+            shape_type=polygon_roi.CUSTOM_SHAPE_TYPE,
+            points_norm=points_norm,
+            top_left_dx_dy=(bounds[0], bounds[1]),
+            size=(bounds[2], bounds[3]),
+            shape_name='Custom polygon')
+
+    def _vp_add_custom_polygon_vertex(self, point_d):
+        if point_d is None:
+            return
+        point_d = [float(point_d[0]), float(point_d[1])]
+        if self.vp_polygon_custom_points:
+            last_point = self.vp_polygon_custom_points[-1]
+            if np.linalg.norm(np.array(point_d) - np.array(last_point)) < 1e-9:
+                return
+        self.vp_polygon_custom_points.append(point_d)
+
+    def _vp_grid_topleft_dx_dy(self, grid_index):
+        grid = self.gm[grid_index]
+        return (
+            grid.origin_dx_dy[0] - grid.tile_width_d() / 2,
+            grid.origin_dx_dy[1] - grid.tile_height_d() / 2)
+
+    def _vp_grid_local_to_global_d(self, grid_index, local_point):
+        grid = self.gm[grid_index]
+        rel_x = local_point[0] - grid.tile_width_d() / 2
+        rel_y = local_point[1] - grid.tile_height_d() / 2
+        theta = radians(grid.rotation)
+        if theta != 0:
+            rot_x = rel_x * cos(theta) - rel_y * sin(theta)
+            rot_y = rel_x * sin(theta) + rel_y * cos(theta)
+            rel_x, rel_y = rot_x, rot_y
+        return [grid.origin_dx_dy[0] + rel_x, grid.origin_dx_dy[1] + rel_y]
+
+    def _vp_mouse_to_grid_local_d(self, px, py, grid_index):
+        grid = self.gm[grid_index]
+        dx, dy = grid.origin_dx_dy
+        origin_vx, origin_vy = self.cs.convert_d_to_v((dx, dy))
+        x_pos = px - origin_vx
+        y_pos = py - origin_vy
+        theta = radians(grid.rotation)
+        if theta != 0:
+            rot_x = x_pos * cos(-theta) - y_pos * sin(-theta)
+            rot_y = x_pos * sin(-theta) + y_pos * cos(-theta)
+            x_pos, y_pos = rot_x, rot_y
+        x_pos = x_pos / self.cs.vp_scale + grid.tile_width_d() / 2
+        y_pos = y_pos / self.cs.vp_scale + grid.tile_height_d() / 2
+        return [x_pos, y_pos]
+
+    def _vp_polygon_points_v(self, grid_index, local_points=None):
+        grid = self.gm[grid_index]
+        if local_points is None:
+            local_points = grid.roi_local_points_d()
+        transform = self._vp_grid_local_transform_v(grid_index)
+        viewport_points = []
+        for point in local_points:
+            mapped = transform.map(
+                QPointF(
+                    float(point[0] * self.cs.vp_scale),
+                    float(point[1] * self.cs.vp_scale)))
+            viewport_points.append([mapped.x(), mapped.y()])
+        return viewport_points
+
+    def _vp_grid_local_transform_v(self, grid_index):
+        grid = self.gm[grid_index]
+        dx, dy = grid.origin_dx_dy
+        origin_vx, origin_vy = self.cs.convert_d_to_v((dx, dy))
+        top_left_dx = dx - grid.tile_width_d() / 2
+        top_left_dy = dy - grid.tile_height_d() / 2
+        topleft_vx, topleft_vy = self.cs.convert_d_to_v((top_left_dx, top_left_dy))
+        transform = QTransform()
+        if grid.rotation != 0:
+            transform.translate(origin_vx, origin_vy)
+            transform.rotate(grid.rotation)
+            transform.translate(
+                -grid.tile_width_d() / 2 * self.cs.vp_scale,
+                -grid.tile_height_d() / 2 * self.cs.vp_scale)
+        else:
+            transform.translate(topleft_vx, topleft_vy)
+        return transform
+
+    def _vp_visible_grid_indices(self):
+        if self.vp_current_grid == -2:
+            return []
+        if self.vp_current_grid == -1:
+            return list(reversed(range(self.gm.number_grids)))
+        if 0 <= self.vp_current_grid < self.gm.number_grids:
+            return [self.vp_current_grid]
+        return []
+
+    def _vp_point_segment_distance_sq(self, point, seg_start, seg_end):
+        point_x, point_y = point
+        start_x, start_y = seg_start
+        end_x, end_y = seg_end
+        seg_dx = end_x - start_x
+        seg_dy = end_y - start_y
+        if abs(seg_dx) < 1e-9 and abs(seg_dy) < 1e-9:
+            return (point_x - start_x) ** 2 + (point_y - start_y) ** 2
+        projection = (
+            ((point_x - start_x) * seg_dx + (point_y - start_y) * seg_dy)
+            / (seg_dx ** 2 + seg_dy ** 2))
+        projection = np.clip(projection, 0.0, 1.0)
+        nearest_x = start_x + projection * seg_dx
+        nearest_y = start_y + projection * seg_dy
+        return (point_x - nearest_x) ** 2 + (point_y - nearest_y) ** 2
+
+    def _vp_point_near_polygon_edge(self, point, polygon_points, tolerance=6.0):
+        if len(polygon_points) < 2:
+            return False
+        tolerance_sq = tolerance ** 2
+        for index in range(len(polygon_points)):
+            seg_start = polygon_points[index]
+            seg_end = polygon_points[(index + 1) % len(polygon_points)]
+            if (self._vp_point_segment_distance_sq(
+                    point, seg_start, seg_end) <= tolerance_sq):
+                return True
+        return False
+
+    def _vp_polygon_handle_positions_v(self, grid_index):
+        grid = self.gm[grid_index]
+        if not grid.has_polygon_roi():
+            return []
+        if grid.roi_shape_type in polygon_roi.PREDEFINED_SHAPE_TYPES:
+            width, height = grid.sw_sh
+            local_points = [
+                [0.0, 0.0],
+                [width, 0.0],
+                [width, height],
+                [0.0, height],
+            ]
+        else:
+            local_points = grid.roi_local_points_d()
+        return self._vp_polygon_points_v(grid_index, local_points)
+
+    def _vp_polygon_handle_hit_test(self, px, py):
+        for grid_index in self._vp_visible_grid_indices():
+            grid = self.gm[grid_index]
+            if not grid.has_polygon_roi():
+                continue
+            handle_positions = self._vp_polygon_handle_positions_v(grid_index)
+            if grid_index == self.selected_grid:
+                hit_radius_sq = 20 ** 2
+            else:
+                hit_radius_sq = 12 ** 2
+            for index, point in enumerate(handle_positions):
+                if ((point[0] - px) ** 2 + (point[1] - py) ** 2) <= hit_radius_sq:
+                    if grid.roi_shape_type in polygon_roi.PREDEFINED_SHAPE_TYPES:
+                        return (grid_index, 'resize', index)
+                    return (grid_index, 'vertex', index)
+        return None
+
+    def _vp_require_explicit_large_deferred_polygon_selection(self, grid_index):
+        grid = self.gm[grid_index]
+        if not grid.is_deferred_polygon_roi():
+            return False
+        guardrail = self.gm.polygon_guardrail_state(grid.roi_estimated_tile_count)
+        return guardrail['warn']
+
+    def _vp_polygon_body_hit_test(self, px, py,
+                                  allow_large_deferred_interior=True):
+        point = (px, py)
+        for grid_index in self._vp_visible_grid_indices():
+            grid = self.gm[grid_index]
+            if not grid.has_polygon_roi():
+                continue
+            polygon_points = self._vp_polygon_points_v(grid_index)
+            if len(polygon_points) < 3:
+                continue
+            if self._vp_point_near_polygon_edge(point, polygon_points):
+                return grid_index
+            if polygon_roi.point_in_polygon(point, polygon_points):
+                if (allow_large_deferred_interior
+                        or not self._vp_require_explicit_large_deferred_polygon_selection(
+                            grid_index)):
+                    return grid_index
+        return None
+
+    def _vp_begin_polygon_handle_drag(self, drag_kind, handle_index):
+        if self.selected_grid is None:
+            return
+        grid = self.gm[self.selected_grid]
+        if drag_kind == 'resize':
+            width, height = grid.sw_sh
+            anchor_points = [
+                [width, height],
+                [0.0, height],
+                [0.0, 0.0],
+                [width, 0.0],
+            ]
+            self.vp_polygon_handle_drag = {
+                'grid_index': self.selected_grid,
+                'handle_index': handle_index,
+                'anchor_local': anchor_points[handle_index],
+            }
+        elif drag_kind == 'vertex':
+            self.vp_polygon_vertex_drag = {
+                'grid_index': self.selected_grid,
+                'vertex_index': handle_index,
+            }
+
+    def _vp_update_polygon_resize(self, px, py):
+        drag_state = self.vp_polygon_handle_drag
+        if drag_state is None:
+            return
+        grid_index = drag_state['grid_index']
+        grid = self.gm[grid_index]
+        mouse_local = self._vp_mouse_to_grid_local_d(px, py, grid_index)
+        anchor_x, anchor_y = drag_state['anchor_local']
+        left = min(mouse_local[0], anchor_x)
+        right = max(mouse_local[0], anchor_x)
+        top = min(mouse_local[1], anchor_y)
+        bottom = max(mouse_local[1], anchor_y)
+        width = max(1.0, right - left)
+        height = max(1.0, bottom - top)
+        top_left_dx_dy = self._vp_grid_local_to_global_d(grid_index, [left, top])
+        grid.sw_sh = [width, height]
+        if grid.is_deferred_polygon_roi():
+            self.gm.update_deferred_polygon_grid(
+                grid_index, top_left_dx_dy=top_left_dx_dy)
+        else:
+            self.gm.refresh_polygon_grid(grid_index, top_left_dx_dy=top_left_dx_dy)
+        self.vp_draw()
+
+    def _vp_update_polygon_vertex(self, px, py):
+        drag_state = self.vp_polygon_vertex_drag
+        if drag_state is None:
+            return
+        grid_index = drag_state['grid_index']
+        grid = self.gm[grid_index]
+        local_points = grid.roi_local_points_d()
+        if not local_points:
+            return
+        local_points[drag_state['vertex_index']] = (
+            self._vp_mouse_to_grid_local_d(px, py, grid_index))
+        points_norm, bounds = polygon_roi.normalize_points(local_points)
+        top_left_dx_dy = self._vp_grid_local_to_global_d(
+            grid_index,
+            [bounds[0], bounds[1]])
+        grid.set_polygon_roi(
+            grid.roi_shape_type,
+            points_norm,
+            grid.roi_shape_name)
+        grid.sw_sh = [max(1.0, bounds[2]), max(1.0, bounds[3])]
+        if grid.is_deferred_polygon_roi():
+            self.gm.update_deferred_polygon_grid(
+                grid_index, top_left_dx_dy=top_left_dx_dy)
+        else:
+            self.gm.refresh_polygon_grid(grid_index, top_left_dx_dy=top_left_dx_dy)
+        self.vp_draw()
+
+    def _vp_copy_selected_polygon(self):
+        if self.selected_grid is None:
+            return
+        grid = self.gm[self.selected_grid]
+        if not grid.has_polygon_roi():
+            return
+        self.vp_polygon_clipboard = {
+            'roi_shape_type': grid.roi_shape_type,
+            'roi_shape_name': grid.roi_shape_name,
+            'roi_points_norm': json.loads(json.dumps(grid.roi_points_norm)),
+            'sw_sh': [float(grid.sw_sh[0]), float(grid.sw_sh[1])],
+            'active': grid.active,
+            'frame_size': list(grid.frame_size),
+            'frame_size_selector': grid.frame_size_selector,
+            'overlap': grid.overlap,
+            'pixel_size': grid.pixel_size,
+            'dwell_time': grid.dwell_time,
+            'dwell_time_selector': grid.dwell_time_selector,
+            'bit_depth_selector': grid.bit_depth_selector,
+            'rotation': grid.rotation,
+            'row_shift': grid.row_shift,
+            'acq_interval': grid.acq_interval,
+            'acq_interval_offset': grid.acq_interval_offset,
+            'wd_stig_xy': list(grid.wd_stig_xy),
+            'use_wd_gradient': grid.use_wd_gradient,
+            'wd_gradient_ref_tiles': list(grid.wd_gradient_ref_tiles),
+            'wd_gradient_params': list(grid.wd_gradient_params),
+        }
+
+    def _vp_paste_polygon_at(self, centre_dx_dy):
+        if self.vp_polygon_clipboard is None:
+            return
+        clip = self.vp_polygon_clipboard
+        new_grid = self.gm.add_new_grid(
+            origin_sx_sy=self.cs.convert_d_to_s((centre_dx_dy[0], centre_dx_dy[1])),
+            sw_sh=clip['sw_sh'],
+            active=clip['active'],
+            frame_size=clip['frame_size'],
+            frame_size_selector=clip['frame_size_selector'],
+            overlap=clip['overlap'],
+            pixel_size=clip['pixel_size'],
+            dwell_time=clip['dwell_time'],
+            dwell_time_selector=clip['dwell_time_selector'],
+            bit_depth_selector=clip['bit_depth_selector'],
+            rotation=clip['rotation'],
+            row_shift=clip['row_shift'],
+            acq_interval=clip['acq_interval'],
+            acq_interval_offset=clip['acq_interval_offset'],
+            wd_stig_xy=clip['wd_stig_xy'],
+            use_wd_gradient=clip['use_wd_gradient'],
+            wd_gradient_ref_tiles=clip['wd_gradient_ref_tiles'],
+            wd_gradient_params=clip['wd_gradient_params'],
+            size=[1, 1])
+        new_grid.set_polygon_roi(
+            clip['roi_shape_type'],
+            clip['roi_points_norm'],
+            clip['roi_shape_name'])
+        new_index = self.gm.number_grids - 1
+        self.gm.refresh_polygon_grid(new_index, centre_dx_dy=centre_dx_dy)
+        self.selected_grid = new_index
+        self.selected_tile = None
+        self.vp_current_grid = new_index
+        self.vp_update_grid_selector()
+        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+        self.vp_draw()
+
+    def _vp_duplicate_selected_polygon(self):
+        if self.selected_grid is None:
+            return
+        self._vp_copy_selected_polygon()
+        grid = self.gm[self.selected_grid]
+        offset_dx_dy = [
+            grid.centre_dx_dy[0] + max(5.0, grid.sw_sh[0] * 0.15),
+            grid.centre_dx_dy[1] + max(5.0, grid.sw_sh[1] * 0.15),
+        ]
+        self._vp_paste_polygon_at(offset_dx_dy)
+
+    def _vp_delete_selected_polygon(self):
+        if self.selected_grid is None:
+            return
+        if self.selected_grid != self.gm.number_grids - 1:
+            QMessageBox.information(
+                self,
+                'Delete polygon ROI',
+                'Only the most recently created grid can be deleted safely.\n'
+                'Delete or move later grids first.',
+                QMessageBox.Ok)
+            return
+        user_reply = QMessageBox.question(
+            self,
+            'Delete polygon ROI',
+            f'This will delete {self.gm.get_grid_label(self.selected_grid)}.\n'
+            'Proceed?',
+            QMessageBox.Ok | QMessageBox.Cancel)
+        if user_reply != QMessageBox.Ok:
+            return
+        self.gm.delete_grid()
+        self.selected_grid = None
+        self.selected_tile = None
+        self.vp_current_grid = -1
+        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+        self.vp_draw()
 
     # ====================== Below: Viewport (vp) methods ==========================
 
@@ -1010,6 +1969,8 @@ class Viewport(QWidget):
         self.selected_tile = None
         self.selected_ov = None
         self.selected_imported = None
+        self._load_polygon_shape_library()
+        self._rebuild_polygon_toolbar()
         # The following booleans are set to True when the corresponding
         # user actions are active.
         self.grid_draw_active = False
@@ -1020,6 +1981,8 @@ class Viewport(QWidget):
         self.template_drag_active = False
         self.imported_img_drag_active = False
         self.vp_measure_active = False
+        self.vp_polygon_handle_drag = None
+        self.vp_polygon_vertex_drag = None
         #---magc---
         self.grid_selection_or_draw_selection_box_active = False
         #----------
@@ -1311,6 +2274,11 @@ class Viewport(QWidget):
         if px in range(self.cs.vp_width) and py in range(self.cs.vp_height):
             self.selected_grid, self.selected_tile = \
                 self._vp_grid_tile_mouse_selection(px, py)
+            if self.selected_grid is None:
+                polygon_grid = self._vp_polygon_body_hit_test(px, py)
+                if polygon_grid is not None:
+                    self.selected_grid = polygon_grid
+                    self.selected_tile = None
             grid_index, tile_index = self.selected_grid, self.selected_tile
             grid_label = self.gm.get_grid_label(grid_index)
             self.selected_ov = self._vp_ov_mouse_selection(px, py)
@@ -1321,6 +2289,7 @@ class Viewport(QWidget):
             # self.selected_template = self._vp_template_mouse_selection(px, py)
             sx, sy = self.cs.convert_mouse_to_s((px, py))
             dx, dy = self.cs.convert_s_to_d((sx, sy))
+            self.vp_polygon_context_dx_dy = (dx, dy)
             current_pos_str = ('Move stage to X: {0:.3f}, '.format(sx)
                                + 'Y: {0:.3f}'.format(sy))
             self.selected_stage_pos = (sx, sy)
@@ -1393,6 +2362,32 @@ class Viewport(QWidget):
                     self._vp_open_change_grid_rotation_dlg)
             else:
                 action_changeRotation = None
+
+            polygon_grid_selected = (
+                grid_index is not None and self.gm[grid_index].has_polygon_roi())
+            if polygon_grid_selected:
+                menu.addSeparator()
+                action_copyPolygon = menu.addAction(
+                    f'Copy ROI shape from {grid_label}')
+                action_copyPolygon.triggered.connect(self._vp_copy_selected_polygon)
+                action_duplicatePolygon = menu.addAction(
+                    f'Duplicate ROI shape from {grid_label}')
+                action_duplicatePolygon.triggered.connect(
+                    self._vp_duplicate_selected_polygon)
+                action_deletePolygon = menu.addAction(
+                    f'Delete ROI shape from {grid_label}')
+                action_deletePolygon.triggered.connect(
+                    self._vp_delete_selected_polygon)
+                if self.selected_grid != self.gm.number_grids - 1:
+                    action_deletePolygon.setEnabled(False)
+            else:
+                action_copyPolygon = None
+                action_duplicatePolygon = None
+                action_deletePolygon = None
+            action_pastePolygon = menu.addAction('Paste ROI shape here')
+            action_pastePolygon.triggered.connect(
+                lambda: self._vp_paste_polygon_at(self.vp_polygon_context_dx_dy))
+            action_pastePolygon.setEnabled(self.vp_polygon_clipboard is not None)
 
             if self.gm.array_mode:
                 action_moveGridCurrentStage = menu.addAction(
@@ -1820,6 +2815,7 @@ class Viewport(QWidget):
 
     def vp_draw(self, suppress_labels=False, suppress_previews=False):
         """Draw all elements on Viewport canvas"""
+        self._vp_normalize_selection_state()
         draw_started = time()
         show_debris_area = (self.ovm.detection_area_visible
                             and self.acq.use_debris_detection)
@@ -1828,97 +2824,103 @@ class Viewport(QWidget):
         # Start with empty black canvas
         self.vp_canvas.fill(Qt.black)
         # Begin painting on canvas
-        self.vp_qp.begin(self.vp_canvas)
-        self.vp_qp.setRenderHint(QPainter.Antialiasing, self.render_antialias)
-        # First, show stub OV if option selected and stub OV image exists:
-        if self.show_stub_ov:
-            self._vp_place_stub_overview(self.ovm['stub_lm'])
-            self._vp_place_stub_overview(self.ovm['stub'])
-            # self._place_template()
-        # Place OV overviews over stub OV:
-        if self.vp_current_ov == -1:  # show all
-            for ov_index in range(self.ovm.number_ov):
-                self._vp_place_overview(ov_index,
+        painter_active = self.vp_qp.begin(self.vp_canvas)
+        if not painter_active:
+            return
+        try:
+            self.vp_qp.setRenderHint(QPainter.Antialiasing, self.render_antialias)
+            # First, show stub OV if option selected and stub OV image exists:
+            if self.show_stub_ov:
+                self._vp_place_stub_overview(self.ovm['stub_lm'])
+                self._vp_place_stub_overview(self.ovm['stub'])
+                # self._place_template()
+            # Place OV overviews over stub OV:
+            if self.vp_current_ov == -1:  # show all
+                for ov_index in range(self.ovm.number_ov):
+                    self._vp_place_overview(ov_index,
+                                            show_debris_area,
+                                            suppress_labels)
+            if self.vp_current_ov >= 0:  # show only the selected OV
+                self._vp_place_overview(self.vp_current_ov,
                                         show_debris_area,
                                         suppress_labels)
-        if self.vp_current_ov >= 0:  # show only the selected OV
-            self._vp_place_overview(self.vp_current_ov,
-                                    show_debris_area,
+            # Tile preview mode
+            if self.vp_tile_preview_mode == 0:   # No previews, only show grid lines
+                show_grid, show_previews, with_gaps = True, False, False
+            elif self.vp_tile_preview_mode == 1: # Show previews with grid lines
+                show_grid, show_previews, with_gaps = True, True, False
+            elif self.vp_tile_preview_mode == 2: # Show previews without grid lines
+                show_grid, show_previews, with_gaps = False, True, False
+            elif self.vp_tile_preview_mode == 3: # Show previews with gaps, no grid
+                show_grid, show_previews, with_gaps = False, True, True
+            if suppress_previews:                # this parameter of vp_draw()
+                show_previews = False            # overrides the tile preview mode
+
+            if self.vp_current_grid >= 0:
+                # show only the selected grid
+                grid_indices = [self.vp_current_grid]
+            else:
+                # show all grids
+                grid_indices = range(self.gm.number_grids)
+            for grid_index in grid_indices:
+                self._vp_place_grid(grid_index,
+                                    show_grid,
+                                    show_previews,
+                                    with_gaps,
                                     suppress_labels)
-        # Tile preview mode
-        if self.vp_tile_preview_mode == 0:   # No previews, only show grid lines
-            show_grid, show_previews, with_gaps = True, False, False
-        elif self.vp_tile_preview_mode == 1: # Show previews with grid lines
-            show_grid, show_previews, with_gaps = True, True, False
-        elif self.vp_tile_preview_mode == 2: # Show previews without grid lines
-            show_grid, show_previews, with_gaps = False, True, False
-        elif self.vp_tile_preview_mode == 3: # Show previews with gaps, no grid
-            show_grid, show_previews, with_gaps = False, True, True
-        if suppress_previews:                # this parameter of vp_draw()
-            show_previews = False            # overrides the tile preview mode
 
-        if self.vp_current_grid >= 0:
-            # show only the selected grid
-            grid_indices = [self.vp_current_grid]
-        else:
-            # show all grids
-            grid_indices = range(self.gm.number_grids)
-        for grid_index in grid_indices:
-            self._vp_place_grid(grid_index,
-                                show_grid,
-                                show_previews,
-                                with_gaps,
-                                suppress_labels)
+            # Finally, show imported images
+            if self.show_imported:
+                for imported_img_index in range(len(self.imported)):
+                    self._vp_place_imported_img(imported_img_index)
+            # Show stage boundaries (motor range limits)
+            self._vp_draw_stage_boundaries()
+            if self.show_axes:
+                self._vp_draw_stage_axes()
+            # Show interactive features
+            if self.grid_draw_active:
+                self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
+                                     constants.COLOUR_SELECTOR[0], line_style=Qt.DashLine)
+                self._vp_draw_live_grid_layout()
+            if self.ov_draw_active:
+                self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
+                                     constants.COLOUR_SELECTOR[10], line_style=Qt.DashLine)
+            if self.template_draw_active:
+                self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
+                                     constants.COLOUR_SELECTOR[8], line_style=Qt.DashLine)
+            self._vp_draw_pending_polygon()
 
-        # Finally, show imported images
-        if self.show_imported:
-            for imported_img_index in range(len(self.imported)):
-                self._vp_place_imported_img(imported_img_index)
-        # Show stage boundaries (motor range limits)
-        self._vp_draw_stage_boundaries()
-        if self.show_axes:
-            self._vp_draw_stage_axes()
-        # Show interactive features
-        if self.grid_draw_active:
-            self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
-                                 constants.COLOUR_SELECTOR[0], line_style=Qt.DashLine)
-            self._vp_draw_live_grid_layout()
-        if self.ov_draw_active:
-            self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
-                                 constants.COLOUR_SELECTOR[10], line_style=Qt.DashLine)
-        if self.template_draw_active:
-            self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
-                                 constants.COLOUR_SELECTOR[8], line_style=Qt.DashLine)
+            # --- array mode ---
+            if self.grid_selection_or_draw_selection_box_active:
+                self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
+                                     constants.COLOUR_SELECTOR[0], line_style=Qt.DashLine)
+            self._place_landmarks()
 
-        # --- array mode ---
-        if self.grid_selection_or_draw_selection_box_active:
-            self._draw_rectangle(self.vp_qp, self.drag_origin, self.drag_current,
-                                 constants.COLOUR_SELECTOR[0], line_style=Qt.DashLine)
-        self._place_landmarks()
+            #-----------------------------------------#
 
-        #-----------------------------------------#
-
-        # ------
-        if self.vp_measure_active:
-            self._draw_measure_labels(self.vp_qp)
-        # Show help panel
-        if self.help_panel_visible:
-            self.vp_qp.drawPixmap(QPointF(self.cs.vp_width - 200,
-                                  self.cs.vp_height - 550),
-                                  self.vp_help_panel_img)
-        # Simulation mode indicator
-        if self.sem.simulation_mode:
-            self._show_simulation_mode_indicator()
-        # Active user flag
-        if self.active_user_flag_enabled:
-            self._show_active_user_flag()
-        # Show current stage position
-        if self.show_stage_pos:
-            self._show_stage_position_indicator()
-        self._vp_draw_selection_overlay()
-        if self.render_debug_enabled:
-            self._vp_draw_render_diagnostics((time() - draw_started) * 1000)
-        self.vp_qp.end()
+            # ------
+            if self.vp_measure_active:
+                self._draw_measure_labels(self.vp_qp)
+            # Show help panel
+            if self.help_panel_visible:
+                self.vp_qp.drawPixmap(QPointF(self.cs.vp_width - 200,
+                                      self.cs.vp_height - 550),
+                                      self.vp_help_panel_img)
+            # Simulation mode indicator
+            if self.sem.simulation_mode:
+                self._show_simulation_mode_indicator()
+            # Active user flag
+            if self.active_user_flag_enabled:
+                self._show_active_user_flag()
+            # Show current stage position
+            if self.show_stage_pos:
+                self._show_stage_position_indicator()
+            self._vp_draw_selection_overlay()
+            if self.render_debug_enabled:
+                self._vp_draw_render_diagnostics((time() - draw_started) * 1000)
+        finally:
+            if self.vp_qp.isActive():
+                self.vp_qp.end()
         # All elements have been drawn on the canvas, now show them in the
         # Viewport window.
         self.QLabel_ViewportCanvas.setPixmap(self.vp_canvas)
@@ -2031,9 +3033,14 @@ class Viewport(QWidget):
         if self.selected_grid is not None:
             grid = self.gm[self.selected_grid]
             grid_label = self.gm.get_grid_label(self.selected_grid)
-            lines.append(
+            selection_line = (
                 f'Selected: {grid_label} | active={int(grid.active)} '
                 f'locked={int(grid.locked)} acquired={int(grid.acquired)}')
+            if grid.is_deferred_polygon_roi():
+                selection_line += (
+                    f' | deferred est={grid.roi_estimated_tile_count:,} '
+                    f'({grid.roi_estimated_rows} x {grid.roi_estimated_cols})')
+            lines.append(selection_line)
             min_x, max_x, min_y, max_y = grid.bounding_box()
             top_left_v = self.cs.convert_d_to_v((min_x, min_y))
             bottom_right_v = self.cs.convert_d_to_v((max_x, max_y))
@@ -2063,7 +3070,11 @@ class Viewport(QWidget):
                 x0, y0, width, height))
         if not lines:
             return
-        width = 440
+        if (self.selected_grid is not None
+                and self.gm[self.selected_grid].is_deferred_polygon_roi()):
+            width = 620
+        else:
+            width = 440
         height = 18 * len(lines) + 8
         panel_rect = QRectF(8, 24, width, height)
         self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
@@ -2083,14 +3094,17 @@ class Viewport(QWidget):
             f"Render diagnostics: antialias={int(self.render_antialias)} "
             f"scale={self.cs.vp_scale:.3f} draw={draw_time_ms:.1f} ms "
             f"layers(OV={self.ovm.number_ov}, grid={self.gm.number_grids})")
+        panel_width = min(520, max(260, self.cs.vp_width - 16))
+        panel_x = max(8, self.cs.vp_width - panel_width - 8)
+        panel_y = 8
         self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
         self.vp_qp.setBrush(QColor(255, 255, 255, 215))
-        self.vp_qp.drawRect(QRectF(8, self.cs.vp_height - 26, 520, 18))
+        self.vp_qp.drawRect(QRectF(panel_x, panel_y, panel_width, 18))
         self.vp_qp.setPen(QPen(QColor(0, 0, 0), 1, Qt.SolidLine))
         font = QFont()
         font.setPixelSize(11)
         self.vp_qp.setFont(font)
-        self.vp_qp.drawText(QRectF(12, self.cs.vp_height - 24, 516, 16),
+        self.vp_qp.drawText(QRectF(panel_x + 4, panel_y + 2, panel_width - 8, 16),
                             Qt.AlignVCenter | Qt.AlignLeft, text)
 
     def _show_stage_position_indicator(self):
@@ -2406,6 +3420,92 @@ class Viewport(QWidget):
                                     width * resize_ratio + w4,
                                     height * resize_ratio + w4))
 
+    def _vp_draw_polygon_overlay(self, grid_index):
+        grid = self.gm[grid_index]
+        if not grid.has_polygon_roi():
+            return
+
+        polygon_points = grid.roi_local_points_d()
+        if len(polygon_points) < 3:
+            return
+
+        selected = (grid_index == self.selected_grid)
+        overlay_colour = QColor(255, 255, 255, 220 if selected else 140)
+        self.vp_qp.setPen(QPen(overlay_colour, 2 if selected else 1, Qt.DashLine))
+        self.vp_qp.setBrush(QColor(255, 255, 255, 0))
+        polygon_points_v = [
+            QPointF(point[0] * self.cs.vp_scale, point[1] * self.cs.vp_scale)
+            for point in polygon_points]
+        for index, point in enumerate(polygon_points_v):
+            next_point = polygon_points_v[(index + 1) % len(polygon_points_v)]
+            self.vp_qp.drawLine(point, next_point)
+
+        if grid.is_deferred_polygon_roi():
+            note_rect = QRectF(
+                0,
+                max(6, grid.sw_sh[1] * self.cs.vp_scale * 0.5 - 12),
+                max(120, grid.sw_sh[0] * self.cs.vp_scale),
+                24)
+            self.vp_qp.setPen(QPen(QColor(255, 255, 255), 1, Qt.SolidLine))
+            self.vp_qp.setBrush(QColor(20, 20, 20, 170))
+            self.vp_qp.drawRect(note_rect)
+            deferred_text = (
+                f'Deferred ROI: {grid.roi_estimated_tile_count:,} est. tiles')
+            self.vp_qp.drawText(
+                note_rect,
+                Qt.AlignVCenter | Qt.AlignHCenter,
+                deferred_text)
+
+        if not selected:
+            return
+
+        if grid.roi_shape_type in polygon_roi.PREDEFINED_SHAPE_TYPES:
+            handle_points = [
+                QPointF(0, 0),
+                QPointF(grid.sw_sh[0] * self.cs.vp_scale, 0),
+                QPointF(grid.sw_sh[0] * self.cs.vp_scale, grid.sw_sh[1] * self.cs.vp_scale),
+                QPointF(0, grid.sw_sh[1] * self.cs.vp_scale),
+            ]
+        else:
+            handle_points = polygon_points_v
+
+        handle_size = 8
+        self.vp_qp.setPen(QPen(QColor(255, 255, 255), 1, Qt.SolidLine))
+        if self.use_klab_ui:
+            self.vp_qp.setBrush(QColor(8, 76, 97, 220))
+        else:
+            self.vp_qp.setBrush(QColor(20, 20, 20, 220))
+        for point in handle_points:
+            self.vp_qp.drawRect(QRectF(
+                point.x() - handle_size / 2,
+                point.y() - handle_size / 2,
+                handle_size,
+                handle_size))
+
+    def _vp_draw_pending_polygon(self):
+        if self.vp_polygon_tool != polygon_roi.CUSTOM_SHAPE_TYPE:
+            return
+        if not self.vp_polygon_custom_points:
+            return
+
+        self.vp_qp.setPen(QPen(QColor(255, 255, 255), 2, Qt.DashLine))
+        self.vp_qp.setBrush(QColor(255, 255, 255))
+        for index in range(len(self.vp_polygon_custom_points) - 1):
+            point0 = self.cs.convert_d_to_v(self.vp_polygon_custom_points[index])
+            point1 = self.cs.convert_d_to_v(self.vp_polygon_custom_points[index + 1])
+            self.vp_qp.drawLine(
+                QPointF(float(point0[0]), float(point0[1])),
+                QPointF(float(point1[0]), float(point1[1])))
+        if self.vp_polygon_hover_point is not None:
+            point0 = self.cs.convert_d_to_v(self.vp_polygon_custom_points[-1])
+            point1 = self.cs.convert_d_to_v(self.vp_polygon_hover_point)
+            self.vp_qp.drawLine(
+                QPointF(float(point0[0]), float(point0[1])),
+                QPointF(float(point1[0]), float(point1[1])))
+        for point in self.vp_polygon_custom_points:
+            vx, vy = self.cs.convert_d_to_v(point)
+            self.vp_qp.drawEllipse(QPointF(vx, vy), 4, 4)
+
     def _vp_place_grid(self, grid_index,
                        show_grid=True, show_previews=False, with_gaps=False,
                        suppress_labels=False):
@@ -2448,9 +3548,19 @@ class Viewport(QWidget):
                 or self.grid_drag_active):
             suppress_labels = True
 
-        visible = self._vp_element_visible(
-            topleft_vx, topleft_vy, width_px, height_px, resize_ratio,
-            origin_vx, origin_vy, theta)
+        if grid.is_deferred_polygon_roi():
+            min_x, max_x, min_y, max_y = grid.bounding_box()
+            top_left_v = self.cs.convert_d_to_v((min_x, min_y))
+            bottom_right_v = self.cs.convert_d_to_v((max_x, max_y))
+            visible = not (
+                min(top_left_v[0], bottom_right_v[0]) > self.cs.vp_width
+                or max(top_left_v[0], bottom_right_v[0]) < 0
+                or min(top_left_v[1], bottom_right_v[1]) > self.cs.vp_height
+                or max(top_left_v[1], bottom_right_v[1]) < 0)
+        else:
+            visible = self._vp_element_visible(
+                topleft_vx, topleft_vy, width_px, height_px, resize_ratio,
+                origin_vx, origin_vy, theta)
 
         # Proceed only if at least a part of the grid is visible
         if not visible:
@@ -2484,6 +3594,8 @@ class Viewport(QWidget):
                 width_factor = 5.3
             else:
                 width_factor = 10.5
+            if grid.is_deferred_polygon_roi():
+                width_factor = max(width_factor, 12.5)
             grid_label_rect = QRect(0,
                                     -int(4/3 * fontsize),
                                     int(width_factor * fontsize),
@@ -2497,11 +3609,20 @@ class Viewport(QWidget):
             # Show the grid label in different versions, depending on
             # whether grid is active
             grid_label_text = grid_label
+            if grid.is_deferred_polygon_roi():
+                grid_label_text += ' (deferred)'
             if not grid.active:
                 grid_label_text += ' (inactive)'
             self.vp_qp.drawText(grid_label_rect,
                                 Qt.AlignVCenter | Qt.AlignHCenter,
                                 grid_label_text)
+
+        # Deferred polygon ROIs draw only the polygon overlay and skip
+        # full tile materialization in the viewport.
+        if grid.is_deferred_polygon_roi():
+            self._vp_draw_polygon_overlay(grid_index)
+            self.vp_qp.resetTransform()
+            return
 
         # If grid is inactive, only the label will be drawn, nothing else.
         # Reset the QPainter and return in this case
@@ -2670,6 +3791,7 @@ class Viewport(QWidget):
                                  int(tile_map[0][1] * resize_ratio))
 
         # Reset painter (undo translation and rotation).
+        self._vp_draw_polygon_overlay(grid_index)
         self.vp_qp.resetTransform()
 
         # ---- Autofocus points in Array mode ---- #
@@ -3070,6 +4192,9 @@ class Viewport(QWidget):
                 # Correction for top-left corner.
                 x += tile_width_p / 2 * pixel_size / 1000 * self.cs.vp_scale
                 y += tile_height_p / 2 * pixel_size / 1000 * self.cs.vp_scale
+
+            if self.gm[grid_index].is_deferred_polygon_roi():
+                continue
 
             if not 'multisem' in self.sem.device_name.lower():
                 # Check if mouse click position is within current grid's tile area

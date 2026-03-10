@@ -90,6 +90,8 @@ class Acquisition:
         self.acq_run_mode = None
         self.acq_paused = (self.cfg['acq']['paused'].lower() == 'true')
         self.stack_completed = False
+        self.force_single_surface_overwrite = False
+        self.current_run_overwrite_existing_files = False
         self.report_requested = False
         self.slice_counter = int(self.cfg['acq']['slice_counter'])
         if microtome is None:
@@ -643,12 +645,25 @@ class Acquisition:
         finally:
             self.acq_in_progress = False
             self.acq_run_mode = None
+            self.current_run_overwrite_existing_files = False
 
     def run_acquisition(self):
         """Run acquisition in a thread started from MainControls.py."""
 
         self.reset_error_state()
         self.pause_state = None
+        # A previous single-surface run (`number_slices == 0`) sets
+        # `stack_completed` to terminate the loop after one pass. Reset it at
+        # the start of every new run so Start/Continue can enter the loop again.
+        self.stack_completed = False
+        self.current_run_overwrite_existing_files = (
+            self.force_single_surface_overwrite)
+        self.force_single_surface_overwrite = False
+        if self.current_run_overwrite_existing_files:
+            self.acq_interrupted = False
+            self.acq_interrupted_at = []
+            self.tiles_acquired = []
+            self.grids_acquired = []
 
         if self.use_mirror_drive:
             # Update the mirror drive directory. Both mirror drive and
@@ -687,6 +702,12 @@ class Acquisition:
             # Save current configuration to disk:
             # Send signal to call save_settings() in MainControls.py
             self.main_controls_trigger.transmit('SAVE CFG')
+            if self.current_run_overwrite_existing_files:
+                self.log(
+                    'CTRL',
+                    'Single-surface rerun confirmed. Existing image files '
+                    'for the current surface will be overwritten.',
+                    'warning')
             # Update progress bar and slice counter in Main Controls GUI
             self.main_controls_trigger.transmit('UPDATE PROGRESS')
 
@@ -1916,7 +1937,10 @@ class Acquisition:
                         # Now acquire the grid (only active tiles, with
                         # image inspection and error handling, and with
                         # autofocus on reference tiles)
-                        self.acquire_grid(grid_index, overwrite=self.gm.array_mode)
+                        self.acquire_grid(
+                            grid_index,
+                            overwrite=(self.gm.array_mode
+                                       or self.current_run_overwrite_existing_files))
 
             else:
                 self.log(
@@ -1936,9 +1960,17 @@ class Acquisition:
             self.interrupted_at = []
             self.acq_interrupted = False
 
-        # If there was no (new) interuption, reset self.grids_acquired
+        # If there was no (new) interruption, reset self.grids_acquired unless
+        # this was a successful single-surface pass. In that specific case,
+        # keep the completed-grid list so a later "Continue" can image only
+        # newly added grids on the same surface instead of restarting at grid 0.
         if not self.acq_interrupted:
-            self.grids_acquired = []
+            preserve_single_surface_progress = (
+                self.number_slices == 0
+                and self.pause_state == 1
+                and self.error_state == Error.none)
+            if not preserve_single_surface_progress:
+                self.grids_acquired = []
 
     def set_scan_rotation(self, grid_index):
         if grid_index is not None:
@@ -3219,6 +3251,66 @@ class Acquisition:
         self.acq_interrupted_at = []
         self.tiles_acquired = []
         self.grids_acquired = []
+        self.force_single_surface_overwrite = False
+        self.current_run_overwrite_existing_files = False
+
+    def single_surface_output_exists(self):
+        """Return True if current-surface output files would conflict."""
+        if self.number_slices != 0:
+            return False
+
+        if self.take_overviews:
+            for ov_index in range(self.ovm.number_ov):
+                ov = self.ovm[ov_index]
+                if not ov.active or not ov.slice_active(self.slice_counter):
+                    continue
+                relative_ov_save_path = utils.ov_relative_save_path(
+                    self.stack_name, ov_index, self.slice_counter)
+                if os.path.isfile(os.path.join(
+                        self.base_dir, relative_ov_save_path)):
+                    return True
+
+        interrupted_grid = None
+        interrupted_tile = None
+        if (self.acq_interrupted
+                and isinstance(self.acq_interrupted_at, list)
+                and len(self.acq_interrupted_at) == 2):
+            interrupted_grid, interrupted_tile = self.acq_interrupted_at
+
+        for grid_index, grid in enumerate(self.gm):
+            if not grid.active or not grid.slice_active(self.slice_counter):
+                continue
+            for tile_index in grid.active_tiles:
+                relative_save_path = utils.tile_relative_save_path(
+                    self.stack_name,
+                    grid_index,
+                    grid.array_index,
+                    grid.roi_index,
+                    tile_index,
+                    self.slice_counter if not self.gm.array_mode else None)
+                if not os.path.isfile(os.path.join(
+                        self.base_dir, relative_save_path)):
+                    continue
+
+                if (not self.acq_interrupted
+                        and grid_index in self.grids_acquired):
+                    continue
+
+                # On a genuine interrupted single-surface resume, files that
+                # belong to already completed grids/tiles are expected. Any
+                # additional file means the current grid layout is colliding
+                # with stale output from a previous run.
+                if self.acq_interrupted:
+                    if grid_index in self.grids_acquired:
+                        continue
+                    if grid_index == interrupted_grid:
+                        if tile_index in self.tiles_acquired:
+                            continue
+                        if tile_index == interrupted_tile:
+                            continue
+                    return True
+
+        return False
 
     def add_to_main_log(self, msg):
         # TODO (BT): Remove this method and add log handler for the session logs

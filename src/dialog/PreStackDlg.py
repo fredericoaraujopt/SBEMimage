@@ -26,7 +26,8 @@ class PreStackDlg(QDialog):
         self.setFixedSize(self.size())
         self.show()
         # Different labels if stack is paused ('Continue' instead of 'Start')
-        if self.acq.acq_paused:
+        if (self.acq.acq_paused
+                and not self.acq.single_surface_output_exists()):
             self.pushButton_startAcq.setText('Continue acquisition')
             self.setWindowTitle('Continue acquisition')
         self.pushButton_startAcq.clicked.connect(self.accept)

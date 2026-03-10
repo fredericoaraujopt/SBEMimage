@@ -7,6 +7,7 @@ import ArrayData
 import constants
 import utils
 from Tile import Tile
+from viewport_polygon_roi import denormalize_points
 
 
 class Grid(list):
@@ -26,7 +27,14 @@ class Grid(list):
                  acquired=False,
                  last_acquisition_timestamp='',
                  last_acquisition_result='not_imaged',
-                 acquired_origin_sx_sy=None):
+                 acquired_origin_sx_sy=None,
+                 roi_shape_type='',
+                 roi_shape_name='',
+                 roi_points_norm=None,
+                 roi_materialized=True,
+                 roi_estimated_rows=0,
+                 roi_estimated_cols=0,
+                 roi_estimated_tile_count=0):
         super().__init__()
         self.cs = coordinate_system
         self.sem = sem
@@ -36,6 +44,8 @@ class Grid(list):
             wd_gradient_ref_tiles = [-1, -1, -1]
         if wd_gradient_params is None:
             wd_gradient_params = [0, 0, 0]
+        if roi_points_norm is None:
+            roi_points_norm = []
         # If auto_update_tile_positions is True, every change to an attribute
         # that influences the tile positions (for example, rotation or overlap)
         # will automatically update the tile positions (default behaviour).
@@ -103,8 +113,23 @@ class Grid(list):
         self.acquired_origin_sx_sy = (
             None if acquired_origin_sx_sy is None
             else list(acquired_origin_sx_sy))
+        self.roi_shape_type = str(roi_shape_type)
+        self.roi_shape_name = str(roi_shape_name)
+        self.roi_points_norm = [
+            [float(point[0]), float(point[1])]
+            for point in roi_points_norm
+            if len(point) == 2]
+        self.roi_materialized = bool(roi_materialized)
+        self.roi_estimated_rows = int(max(0, roi_estimated_rows))
+        self.roi_estimated_cols = int(max(0, roi_estimated_cols))
+        self.roi_estimated_tile_count = int(max(0, roi_estimated_tile_count))
         self.initialize_tiles()
         self.update_tile_positions()
+        if (not isinstance(self.sw_sh, (list, tuple))
+                or len(self.sw_sh) < 2
+                or self.sw_sh[0] <= 0
+                or self.sw_sh[1] <= 0):
+            self.sw_sh = [float(self.width_d()), float(self.height_d())]
         # Restore default for updating tile positions
         self.auto_update_tile_positions = True
         # active_tiles: a list of tile numbers that are active in this grid
@@ -144,6 +169,63 @@ class Grid(list):
         else:
             label = f'GRID {grid_index}'
         return label
+
+    def has_polygon_roi(self):
+        return bool(self.roi_shape_type and len(self.roi_points_norm) >= 3)
+
+    def is_deferred_polygon_roi(self):
+        return self.has_polygon_roi() and not self.roi_materialized
+
+    def set_polygon_roi(self, shape_type, points_norm, shape_name=''):
+        self.roi_shape_type = str(shape_type)
+        self.roi_shape_name = str(shape_name)
+        self.roi_points_norm = [
+            [float(point[0]), float(point[1])]
+            for point in points_norm
+            if len(point) == 2]
+
+    def clear_polygon_roi(self):
+        self.roi_shape_type = ''
+        self.roi_shape_name = ''
+        self.roi_points_norm = []
+        self.roi_materialized = True
+        self.roi_estimated_rows = 0
+        self.roi_estimated_cols = 0
+        self.roi_estimated_tile_count = 0
+
+    def set_polygon_materialization(self, materialized, estimated_rows=0,
+                                    estimated_cols=0, estimated_tile_count=0):
+        self.roi_materialized = bool(materialized)
+        self.roi_estimated_rows = int(max(0, estimated_rows))
+        self.roi_estimated_cols = int(max(0, estimated_cols))
+        self.roi_estimated_tile_count = int(max(0, estimated_tile_count))
+
+    def roi_local_points_d(self):
+        if not self.has_polygon_roi():
+            return []
+        return denormalize_points(
+            self.roi_points_norm,
+            self.sw_sh[0],
+            self.sw_sh[1])
+
+    def roi_global_points_d(self):
+        local_points = self.roi_local_points_d()
+        if len(local_points) < 3:
+            return []
+        origin_dx, origin_dy = self.origin_dx_dy
+        pivot_offset_x = self.tile_width_d() / 2
+        pivot_offset_y = self.tile_height_d() / 2
+        theta = radians(self.rotation)
+        global_points = []
+        for local_x, local_y in local_points:
+            rel_x = local_x - pivot_offset_x
+            rel_y = local_y - pivot_offset_y
+            if theta != 0:
+                rot_x = rel_x * cos(theta) - rel_y * sin(theta)
+                rot_y = rel_x * sin(theta) + rel_y * cos(theta)
+                rel_x, rel_y = rot_x, rot_y
+            global_points.append([origin_dx + rel_x, origin_dy + rel_y])
+        return global_points
 
     def initialize_tiles(self):
         """Create list of tile objects with default parameters."""
@@ -802,6 +884,15 @@ class Grid(list):
 
     def bounding_box(self):
         """Return bounding box of (rotated) grid."""
+        if self.has_polygon_roi():
+            roi_points = self.roi_global_points_d()
+            if len(roi_points) >= 3:
+                points_x = [point[0] for point in roi_points]
+                points_y = [point[1] for point in roi_points]
+                return min(points_x), max(points_x), min(points_y), max(points_y)
+        if self.number_tiles <= 0:
+            dx, dy = self.origin_dx_dy
+            return dx, dx, dy, dy
         bounding_boxes_of_corner_tiles = np.array([
             self.tile_bounding_box(corner_tile_index)
                 for corner_tile_index in self.corner_tiles()])

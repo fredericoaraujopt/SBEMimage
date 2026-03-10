@@ -32,6 +32,15 @@ import ArrayData
 import utils
 from Grid import Grid
 from image_io import imread
+from viewport_polygon_roi import (
+    denormalize_points,
+    point_in_polygon,
+    polygon_intersects_rect,
+)
+
+
+POLYGON_LARGE_ROI_WARNING_TILE_COUNT = 5000
+POLYGON_LARGE_ROI_HARD_TILE_COUNT = 20000
 
 
 class GridManager(list):
@@ -112,6 +121,37 @@ class GridManager(list):
                 grids_data['grid_acquired_origin_sx_sy'])
         else:
             grid_acquired_origin_sx_sy = []
+        if 'roi_shape_type' in grids_data:
+            roi_shape_type = json.loads(grids_data['roi_shape_type'])
+        else:
+            roi_shape_type = []
+        if 'roi_shape_name' in grids_data:
+            roi_shape_name = json.loads(grids_data['roi_shape_name'])
+        else:
+            roi_shape_name = []
+        if 'roi_points_norm' in grids_data:
+            roi_points_norm = json.loads(grids_data['roi_points_norm'])
+        else:
+            roi_points_norm = []
+        if 'roi_materialized' in grids_data:
+            roi_materialized = json.loads(grids_data['roi_materialized'])
+            roi_materialized_present = True
+        else:
+            roi_materialized = []
+            roi_materialized_present = False
+        if 'roi_estimated_rows' in grids_data:
+            roi_estimated_rows = json.loads(grids_data['roi_estimated_rows'])
+        else:
+            roi_estimated_rows = []
+        if 'roi_estimated_cols' in grids_data:
+            roi_estimated_cols = json.loads(grids_data['roi_estimated_cols'])
+        else:
+            roi_estimated_cols = []
+        if 'roi_estimated_tile_count' in grids_data:
+            roi_estimated_tile_count = json.loads(
+                grids_data['roi_estimated_tile_count'])
+        else:
+            roi_estimated_tile_count = []
 
         # Backward compatibility for loading older config files
         if len(grid_active) < self.number_grids:
@@ -138,13 +178,47 @@ class GridManager(list):
             grid_last_acq_result = ['not_imaged'] * self.number_grids
         if len(grid_acquired_origin_sx_sy) < self.number_grids:
             grid_acquired_origin_sx_sy = [None] * self.number_grids
+        if len(roi_shape_type) < self.number_grids:
+            roi_shape_type = [''] * self.number_grids
+        if len(roi_shape_name) < self.number_grids:
+            roi_shape_name = [''] * self.number_grids
+        if len(roi_points_norm) < self.number_grids:
+            roi_points_norm = [[] for _ in range(self.number_grids)]
+        if len(roi_materialized) < self.number_grids:
+            roi_materialized = [True] * self.number_grids
+        if len(roi_estimated_rows) < self.number_grids:
+            roi_estimated_rows = [0] * self.number_grids
+        if len(roi_estimated_cols) < self.number_grids:
+            roi_estimated_cols = [0] * self.number_grids
+        if len(roi_estimated_tile_count) < self.number_grids:
+            roi_estimated_tile_count = [0] * self.number_grids
 
         # Create a list of grid objects with the parameters read from
         # the session configuration.
         for i in range(self.number_grids):
+            polygon_grid = bool(roi_shape_type[i] and len(roi_points_norm[i]) >= 3)
+            stored_rows, stored_cols = size[i]
+            stored_tile_count = int(max(0, stored_rows * stored_cols))
+            stored_estimated_rows = roi_estimated_rows[i] or stored_rows
+            stored_estimated_cols = roi_estimated_cols[i] or stored_cols
+            stored_estimated_tile_count = (
+                roi_estimated_tile_count[i] or stored_tile_count)
+            load_deferred = False
+            if polygon_grid:
+                if not roi_materialized[i]:
+                    load_deferred = True
+                elif (not roi_materialized_present
+                      and stored_tile_count >= POLYGON_LARGE_ROI_WARNING_TILE_COUNT):
+                    load_deferred = True
+                elif stored_tile_count >= POLYGON_LARGE_ROI_HARD_TILE_COUNT:
+                    load_deferred = True
+
+            initial_size = [1, 1] if load_deferred else size[i]
+            initial_active_tiles = [] if load_deferred else active_tiles[i]
+
             grid = Grid(self.cs, self.sem, grid_active[i] == 1, origin_sx_sy[i], sw_sh[i],
-                        rotation[i], size[i], overlap[i], row_shift[i],
-                        active_tiles[i], frame_size[i], frame_size_selector[i],
+                        rotation[i], initial_size, overlap[i], row_shift[i],
+                        initial_active_tiles, frame_size[i], frame_size_selector[i],
                         pixel_size[i], dwell_time[i], dwell_time_selector[i],
                         bit_depth_selector[i],
                         display_colour[i], acq_interval[i],
@@ -155,10 +229,29 @@ class GridManager(list):
                         acquired=grid_acquired[i] == 1,
                         last_acquisition_timestamp=grid_last_acq_ts[i],
                         last_acquisition_result=grid_last_acq_result[i],
-                        acquired_origin_sx_sy=grid_acquired_origin_sx_sy[i])
+                        acquired_origin_sx_sy=grid_acquired_origin_sx_sy[i],
+                        roi_shape_type=roi_shape_type[i],
+                        roi_shape_name=roi_shape_name[i],
+                        roi_points_norm=roi_points_norm[i],
+                        roi_materialized=(polygon_grid and not load_deferred)
+                        or (not polygon_grid),
+                        roi_estimated_rows=stored_estimated_rows,
+                        roi_estimated_cols=stored_estimated_cols,
+                        roi_estimated_tile_count=stored_estimated_tile_count)
             grid.array_index = array_index[i]
             grid.roi_index = roi_index[i]
             self.append(grid)
+
+        for grid_index in range(self.number_grids):
+            if self[grid_index].has_polygon_roi():
+                if self[grid_index].is_deferred_polygon_roi():
+                    self.defer_polygon_grid(
+                        grid_index,
+                        self[grid_index].roi_estimated_rows,
+                        self[grid_index].roi_estimated_cols,
+                        self[grid_index].roi_estimated_tile_count)
+                else:
+                    self.refresh_polygon_grid(grid_index)
 
         # Load working distance and stigmation parameters
         wd_stig_dict = json.loads(grids_data['wd_stig_params'])
@@ -310,6 +403,20 @@ class GridManager(list):
         grids_data['grid_acquired_origin_sx_sy'] = json.dumps(
             utils.convert_numpy_to_list(
                 [grid.acquired_origin_sx_sy for grid in self]))
+        grids_data['roi_shape_type'] = json.dumps(
+            [grid.roi_shape_type for grid in self])
+        grids_data['roi_shape_name'] = json.dumps(
+            [grid.roi_shape_name for grid in self])
+        grids_data['roi_points_norm'] = json.dumps(
+            [grid.roi_points_norm for grid in self])
+        grids_data['roi_materialized'] = json.dumps(
+            [int(grid.roi_materialized) for grid in self])
+        grids_data['roi_estimated_rows'] = json.dumps(
+            [grid.roi_estimated_rows for grid in self])
+        grids_data['roi_estimated_cols'] = json.dumps(
+            [grid.roi_estimated_cols for grid in self])
+        grids_data['roi_estimated_tile_count'] = json.dumps(
+            [grid.roi_estimated_tile_count for grid in self])
         if self.array_mode:
             array_path = self.array_data.path
         else:
@@ -392,6 +499,56 @@ class GridManager(list):
         self.number_grids += 1
         return new_grid
 
+    def add_new_grid_from_polygon(self, top_left_dx_dy, size, shape_type,
+                                  points_norm, shape_name='',
+                                  materialize=True, estimated_layout=None):
+        if self.template_grid_index >= self.number_grids:
+            self.template_grid_index = 0
+        template_grid = self[self.template_grid_index]
+        origin_dx_dy = (
+            top_left_dx_dy[0] + template_grid.tile_width_d() / 2,
+            top_left_dx_dy[1] + template_grid.tile_height_d() / 2)
+        origin_sx_sy = self.cs.convert_d_to_s(origin_dx_dy)
+        new_grid = self.add_new_grid(
+            origin_sx_sy=origin_sx_sy,
+            sw_sh=size,
+            active=template_grid.active,
+            frame_size=template_grid.frame_size,
+            frame_size_selector=template_grid.frame_size_selector,
+            overlap=template_grid.overlap,
+            pixel_size=template_grid.pixel_size,
+            dwell_time=template_grid.dwell_time,
+            dwell_time_selector=template_grid.dwell_time_selector,
+            bit_depth_selector=template_grid.bit_depth_selector,
+            rotation=0,
+            row_shift=template_grid.row_shift,
+            acq_interval=template_grid.acq_interval,
+            acq_interval_offset=template_grid.acq_interval_offset,
+            wd_stig_xy=template_grid.wd_stig_xy,
+            use_wd_gradient=template_grid.use_wd_gradient,
+            wd_gradient_ref_tiles=template_grid.wd_gradient_ref_tiles,
+            wd_gradient_params=template_grid.wd_gradient_params,
+            size=[1, 1])
+        new_grid.set_polygon_roi(shape_type, points_norm, shape_name)
+        new_grid.sw_sh = [float(size[0]), float(size[1])]
+        new_grid_index = self.number_grids - 1
+        if estimated_layout is None:
+            estimated_layout = self.estimate_polygon_layout(new_grid)
+            estimated_layout = {
+                'rows': estimated_layout[0],
+                'cols': estimated_layout[1],
+                'tile_count': estimated_layout[0] * estimated_layout[1],
+            }
+        if materialize:
+            self.refresh_polygon_grid(new_grid_index, top_left_dx_dy=top_left_dx_dy)
+        else:
+            self.defer_polygon_grid(
+                new_grid_index,
+                estimated_layout['rows'],
+                estimated_layout['cols'],
+                estimated_layout['tile_count'])
+        return new_grid_index
+
     def delete_grid(self):
         """Delete the grid with the highest grid index. Grids at indices that
         are smaller than the highest index cannot be deleted because otherwise
@@ -472,6 +629,236 @@ class GridManager(list):
             wd_gradient_params=grid.wd_gradient_params,
             size=[layout['rows'], layout['cols']],
         )
+
+    def estimate_polygon_layout(self, grid):
+        return self.estimate_polygon_layout_for_parameters(
+            grid.sw_sh[0],
+            grid.sw_sh[1],
+            grid.frame_size,
+            grid.pixel_size,
+            grid.overlap,
+            grid.row_shift)
+
+    def estimate_polygon_layout_for_parameters(self, width, height, frame_size,
+                                               pixel_size, overlap, row_shift):
+        tile_width_d = frame_size[0] * pixel_size / 1000
+        tile_height_d = frame_size[1] * pixel_size / 1000
+        overlap_d = overlap * pixel_size / 1000
+        row_shift_d = row_shift * pixel_size / 1000
+        pitch_x = max(1e-9, tile_width_d - overlap_d)
+        pitch_y = max(1e-9, tile_height_d - overlap_d)
+        cols = int(np.ceil(max(0.0, width - row_shift_d + overlap_d) / pitch_x))
+        rows = int(np.ceil(max(0.0, height + overlap_d) / pitch_y))
+        rows = max(1, rows)
+        cols = max(1, cols)
+        return rows, cols
+
+    def polygon_layout_summary(self, width, height, frame_size, pixel_size,
+                               overlap, row_shift):
+        rows, cols = self.estimate_polygon_layout_for_parameters(
+            width, height, frame_size, pixel_size, overlap, row_shift)
+        return {
+            'rows': rows,
+            'cols': cols,
+            'tile_count': rows * cols,
+        }
+
+    def polygon_guardrail_state(self, tile_count):
+        return {
+            'warn': tile_count >= POLYGON_LARGE_ROI_WARNING_TILE_COUNT,
+            'block_materialize': tile_count >= POLYGON_LARGE_ROI_HARD_TILE_COUNT,
+            'warning_threshold': POLYGON_LARGE_ROI_WARNING_TILE_COUNT,
+            'hard_threshold': POLYGON_LARGE_ROI_HARD_TILE_COUNT,
+        }
+
+    def polygon_active_tiles(self, grid):
+        polygon_points = denormalize_points(
+            grid.roi_points_norm,
+            grid.sw_sh[0],
+            grid.sw_sh[1])
+        if len(polygon_points) < 3:
+            return list(range(grid.number_tiles))
+
+        tile_width = grid.tile_width_d()
+        tile_height = grid.tile_height_d()
+        overlap_d = grid.overlap * grid.pixel_size / 1000
+        pitch_x = max(1e-9, tile_width - overlap_d)
+        pitch_y = max(1e-9, tile_height - overlap_d)
+        row_shift_d = grid.row_shift * grid.pixel_size / 1000
+        rows, cols = grid.size
+
+        def covering_tiles_for_point(point_x, point_y):
+            covering = []
+            base_row = int(np.floor(point_y / pitch_y))
+            for row in range(base_row - 1, base_row + 2):
+                if not (0 <= row < rows):
+                    continue
+                row_offset_x = row_shift_d * (row % 2)
+                x_rel = point_x - row_offset_x
+                base_col = int(np.floor(x_rel / pitch_x))
+                for col in range(base_col - 1, base_col + 2):
+                    if not (0 <= col < cols):
+                        continue
+                    rect_x0 = col * pitch_x + row_offset_x
+                    rect_y0 = row * pitch_y
+                    rect_x1 = rect_x0 + tile_width
+                    rect_y1 = rect_y0 + tile_height
+                    if rect_x0 <= point_x <= rect_x1 and rect_y0 <= point_y <= rect_y1:
+                        tile_index = col + row * cols
+                        centre_x = rect_x0 + tile_width / 2
+                        centre_y = rect_y0 + tile_height / 2
+                        covering.append((tile_index, centre_x, centre_y))
+            return covering
+
+        min_x = min(point[0] for point in polygon_points)
+        max_x = max(point[0] for point in polygon_points)
+        min_y = min(point[1] for point in polygon_points)
+        max_y = max(point[1] for point in polygon_points)
+
+        step_x = max(1e-3, min(tile_width, pitch_x) / 3.0)
+        step_y = max(1e-3, min(tile_height, pitch_y) / 3.0)
+        sample_cols = max(1, int(np.ceil(max(0.0, max_x - min_x) / step_x)))
+        sample_rows = max(1, int(np.ceil(max(0.0, max_y - min_y) / step_y)))
+        max_samples = 120000
+        total_samples = sample_cols * sample_rows
+        if total_samples > max_samples:
+            scale = np.sqrt(total_samples / max_samples)
+            step_x *= scale
+            step_y *= scale
+
+        assigned_tiles = set()
+
+        def assign_point(point_x, point_y):
+            covering = covering_tiles_for_point(point_x, point_y)
+            if not covering:
+                return
+            tile_index = min(
+                covering,
+                key=lambda item: (
+                    (item[1] - point_x) ** 2 + (item[2] - point_y) ** 2,
+                    item[0]))[0]
+            assigned_tiles.add(tile_index)
+
+        # Always sample polygon vertices and edges so thin boundary regions are
+        # not lost when overlap-aware assignment removes redundant border tiles.
+        for index, point in enumerate(polygon_points):
+            assign_point(point[0], point[1])
+            next_point = polygon_points[(index + 1) % len(polygon_points)]
+            edge_length = np.hypot(next_point[0] - point[0], next_point[1] - point[1])
+            edge_step = max(step_x, step_y)
+            edge_samples = int(np.ceil(edge_length / edge_step))
+            for sample_index in range(1, edge_samples):
+                fraction = sample_index / edge_samples
+                assign_point(
+                    point[0] + (next_point[0] - point[0]) * fraction,
+                    point[1] + (next_point[1] - point[1]) * fraction)
+
+        y_pos = min_y + step_y / 2
+        while y_pos <= max_y:
+            x_pos = min_x + step_x / 2
+            while x_pos <= max_x:
+                if point_in_polygon((x_pos, y_pos), polygon_points):
+                    assign_point(x_pos, y_pos)
+                x_pos += step_x
+            y_pos += step_y
+
+        if assigned_tiles:
+            return sorted(assigned_tiles)
+
+        active_tiles = []
+        tile_width = grid.tile_width_d()
+        tile_height = grid.tile_height_d()
+        for tile_index in range(grid.number_tiles):
+            tile_x = grid[tile_index].px_py[0] * grid.pixel_size / 1000
+            tile_y = grid[tile_index].px_py[1] * grid.pixel_size / 1000
+            rect = (
+                tile_x,
+                tile_y,
+                tile_x + tile_width,
+                tile_y + tile_height)
+            if polygon_intersects_rect(polygon_points, rect):
+                active_tiles.append(tile_index)
+        return active_tiles
+
+    def refresh_polygon_grid(self, grid_index, top_left_dx_dy=None,
+                             centre_dx_dy=None):
+        grid = self[grid_index]
+        if not grid.has_polygon_roi():
+            return
+
+        if top_left_dx_dy is None and centre_dx_dy is None:
+            top_left_dx_dy = (
+                grid.origin_dx_dy[0] - grid.tile_width_d() / 2,
+                grid.origin_dx_dy[1] - grid.tile_height_d() / 2)
+
+        rows, cols = self.estimate_polygon_layout(grid)
+        grid.auto_update_tile_positions = False
+        grid.set_polygon_materialization(True, rows, cols, rows * cols)
+        grid.size = [rows, cols]
+        if centre_dx_dy is not None:
+            grid.update_tile_positions()
+            grid.centre_sx_sy = self.cs.convert_d_to_s(centre_dx_dy)
+        else:
+            grid.origin_dx_dy = (
+                top_left_dx_dy[0] + grid.tile_width_d() / 2,
+                top_left_dx_dy[1] + grid.tile_height_d() / 2)
+        grid.update_tile_positions()
+        grid.active_tiles = self.polygon_active_tiles(grid)
+        grid.auto_update_tile_positions = True
+
+    def defer_polygon_grid(self, grid_index, estimated_rows=None,
+                           estimated_cols=None, estimated_tile_count=None):
+        grid = self[grid_index]
+        if not grid.has_polygon_roi():
+            return
+        if estimated_rows is None or estimated_cols is None:
+            estimated_rows, estimated_cols = self.estimate_polygon_layout(grid)
+        if estimated_tile_count is None:
+            estimated_tile_count = estimated_rows * estimated_cols
+
+        grid.auto_update_tile_positions = False
+        grid.set_polygon_materialization(
+            False,
+            estimated_rows,
+            estimated_cols,
+            estimated_tile_count)
+        grid._size = [1, 1]
+        grid.number_tiles = 1
+        grid.initialize_tiles()
+        grid.update_tile_positions()
+        grid.active_tiles = []
+        grid.auto_update_tile_positions = True
+
+    def update_deferred_polygon_grid(self, grid_index, top_left_dx_dy=None,
+                                     centre_dx_dy=None):
+        grid = self[grid_index]
+        if not grid.has_polygon_roi():
+            return
+
+        if top_left_dx_dy is None and centre_dx_dy is None:
+            top_left_dx_dy = (
+                grid.origin_dx_dy[0] - grid.tile_width_d() / 2,
+                grid.origin_dx_dy[1] - grid.tile_height_d() / 2)
+
+        if centre_dx_dy is not None:
+            top_left_dx_dy = (
+                centre_dx_dy[0] - grid.sw_sh[0] / 2,
+                centre_dx_dy[1] - grid.sw_sh[1] / 2)
+
+        estimated_rows, estimated_cols = self.estimate_polygon_layout(grid)
+        estimated_tile_count = estimated_rows * estimated_cols
+
+        grid.auto_update_tile_positions = False
+        grid.origin_dx_dy = (
+            top_left_dx_dy[0] + grid.tile_width_d() / 2,
+            top_left_dx_dy[1] + grid.tile_height_d() / 2)
+        grid.auto_update_tile_positions = True
+
+        self.defer_polygon_grid(
+            grid_index,
+            estimated_rows,
+            estimated_cols,
+            estimated_tile_count)
 
     def tile_position_for_registration(self, grid_index, tile_index):
         """Provide tile location (upper left corner of tile) in nanometres.

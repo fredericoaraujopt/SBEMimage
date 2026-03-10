@@ -50,6 +50,7 @@ from qtpy.QtGui import QFont
 
 from dialog.ConfigDlg import ConfigDlg
 from config_template import process_cfg, load_device_presets, default_cfg_found
+from klab_ui import install_klab_theme_polisher
 from MainControls import MainControls
 import utils
 
@@ -285,6 +286,7 @@ def main():
                     ui_font = QFont('Segoe UI')
                     ui_font.setPointSize(font_pt)
                     SBEMimage.setFont(ui_font)
+                    install_klab_theme_polisher(SBEMimage)
                     utils.log_info(
                         'CTRL',
                         f'KLAB UI theme loaded from {theme_path}.')

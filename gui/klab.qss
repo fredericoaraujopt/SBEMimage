@@ -22,11 +22,11 @@ QWidget#mainControls QGroupBox QComboBox,
 QWidget#mainControls QGroupBox QSpinBox,
 QWidget#mainControls QGroupBox QDoubleSpinBox,
 QWidget#mainControls QGroupBox QDateTimeEdit {
-    font-size: 11px;
+    font-size: 10.5px;
 }
 
 QWidget#mainControls QGroupBox::title {
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 600;
 }
 
@@ -44,13 +44,18 @@ QMenuBar {
 
 QMenuBar::item {
     background: transparent;
-    padding: 2px 6px;
+    padding: 2px 5px;
 }
 
 QMenuBar::item:selected {
     background-color: rgba(255, 255, 255, 0.16);
     color: #F2FBFF;
     border-radius: 5px;
+}
+
+QMenuBar::item:disabled {
+    color: rgba(242, 251, 255, 0.46);
+    background: transparent;
 }
 
 QMenu {
@@ -60,7 +65,7 @@ QMenu {
 }
 
 QMenu::item {
-    padding: 3px 8px;
+    padding: 3px 7px;
     color: #022B3A;
 }
 
@@ -95,9 +100,9 @@ QStatusBar {
 QToolBar {
     background-color: rgba(255, 255, 255, 0.94);
     border: 1px solid rgba(2, 43, 58, 0.22);
-    border-radius: 8px;
+    border-radius: 7px;
     spacing: 2px;
-    padding: 1px;
+    padding: 0px;
 }
 
 /* Card surfaces */
@@ -105,15 +110,15 @@ QGroupBox {
     background-color: rgba(255, 255, 255, 0.95);
     color: #022B3A;
     border: 1px solid rgba(2, 43, 58, 0.22);
-    border-radius: 10px;
-    margin-top: 11px;
+    border-radius: 8px;
+    margin-top: 10px;
 }
 
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 9px;
-    padding: 0 3px;
+    left: 8px;
+    padding: 0 2px;
     color: #022B3A;
     background-color: rgba(255, 255, 255, 0.98);
 }
@@ -136,7 +141,7 @@ QTabBar::tab {
     border-bottom: none;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
-    padding: 2px 7px;
+    padding: 2px 6px;
     margin-right: 2px;
 }
 
@@ -145,13 +150,19 @@ QTabBar::tab:selected {
     font-weight: 600;
 }
 
+QTabBar::tab:disabled {
+    color: rgba(2, 43, 58, 0.42);
+    background-color: rgba(255, 255, 255, 0.56);
+    border-color: rgba(2, 43, 58, 0.14);
+}
+
 QPushButton {
     background-color: rgba(255, 255, 255, 0.94);
     color: #022B3A;
     border: 1px solid rgba(2, 43, 58, 0.22);
-    border-radius: 8px;
-    padding: 2px 6px;
-    min-height: 17px;
+    border-radius: 7px;
+    padding: 1px 5px;
+    min-height: 16px;
 }
 
 QPushButton:hover {
@@ -163,8 +174,9 @@ QPushButton:pressed {
 }
 
 QPushButton:disabled {
-    color: rgba(2, 43, 58, 0.48);
-    background-color: rgba(255, 255, 255, 0.66);
+    color: rgba(2, 43, 58, 0.44);
+    background-color: rgba(255, 255, 255, 0.62);
+    border-color: rgba(2, 43, 58, 0.12);
 }
 
 /* Compact toolbutton style to keep "..." visible in 25x19 buttons */
@@ -174,9 +186,9 @@ QToolButton {
     border: 1px solid rgba(2, 43, 58, 0.22);
     border-radius: 6px;
     padding: 0px 1px;
-    min-width: 22px;
-    min-height: 18px;
-    margin: 1px 0px;
+    min-width: 21px;
+    min-height: 17px;
+    margin: 0px;
 }
 
 QToolButton:hover {
@@ -187,13 +199,19 @@ QToolButton:pressed {
     background-color: rgba(8, 76, 97, 0.16);
 }
 
+QToolButton:disabled {
+    color: rgba(2, 43, 58, 0.40);
+    background-color: rgba(255, 255, 255, 0.60);
+    border-color: rgba(2, 43, 58, 0.12);
+}
+
 QLineEdit, QTextEdit, QPlainTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {
     background-color: rgba(255, 255, 255, 0.96);
     color: #022B3A;
     border: 1px solid rgba(2, 43, 58, 0.22);
-    border-radius: 8px;
-    padding: 1px 5px;
+    border-radius: 7px;
+    padding: 0px 4px;
     selection-background-color: rgba(8, 76, 97, 0.30);
 }
 
@@ -201,8 +219,8 @@ QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {
 QComboBox {
     background-color: rgba(255, 255, 255, 0.99);
     border: 1px solid rgba(2, 43, 58, 0.30);
-    padding-left: 5px;
-    padding-right: 6px;
+    padding-left: 4px;
+    padding-right: 5px;
 }
 
 QComboBox:hover {
@@ -215,7 +233,7 @@ QComboBox:focus {
 }
 
 QComboBox::drop-down {
-    width: 16px;
+    width: 14px;
     border: none;
     background: transparent;
 }
@@ -237,14 +255,75 @@ QComboBox:disabled {
     border-color: rgba(2, 43, 58, 0.18);
 }
 
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QDateTimeEdit:disabled {
+    color: rgba(2, 43, 58, 0.46);
+    background-color: rgba(255, 255, 255, 0.72);
+    border-color: rgba(2, 43, 58, 0.16);
+}
+
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    width: 14px;
     border: none;
-    background: transparent;
+    border-left: 1px solid rgba(2, 43, 58, 0.22);
+    background-color: rgba(2, 43, 58, 0.84);
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    border-top-right-radius: 8px;
+}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    border-top: 1px solid rgba(242, 251, 255, 0.18);
+    border-bottom-right-radius: 8px;
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: rgba(2, 43, 58, 0.96);
+}
+
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed,
+QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {
+    background-color: rgba(2, 43, 58, 1.0);
+}
+
+QSpinBox::up-button:disabled, QSpinBox::down-button:disabled,
+QDoubleSpinBox::up-button:disabled, QDoubleSpinBox::down-button:disabled {
+    background-color: rgba(2, 43, 58, 0.30);
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url("gui/klab_spin_arrow_up.svg");
+    width: 7px;
+    height: 5px;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url("gui/klab_dropdown_arrow_down.svg");
+    width: 7px;
+    height: 5px;
+}
+
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {
+    image: url("gui/klab_spin_arrow_up.svg");
+}
+
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+    image: url("gui/klab_dropdown_arrow_down.svg");
 }
 
 QCheckBox, QRadioButton {
     spacing: 5px;
+}
+
+QCheckBox:disabled, QRadioButton:disabled {
+    color: rgba(2, 43, 58, 0.44);
 }
 
 QCheckBox::indicator, QRadioButton::indicator {
@@ -256,6 +335,11 @@ QCheckBox::indicator {
     border: 1px solid rgba(2, 43, 58, 0.34);
     border-radius: 3px;
     background: rgba(255, 255, 255, 0.96);
+}
+
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    border-color: rgba(2, 43, 58, 0.16);
+    background-color: rgba(255, 255, 255, 0.55);
 }
 
 QCheckBox::indicator:checked {
@@ -285,7 +369,61 @@ QHeaderView::section {
     background-color: rgba(8, 76, 97, 0.16);
     color: #022B3A;
     border: 1px solid rgba(2, 43, 58, 0.18);
-    padding: 2px 5px;
+    padding: 1px 4px;
+}
+
+/* Compact-on-demand variants used by the KLAB polisher for fixed geometries. */
+QGroupBox[klabCompact="true"]::title {
+    font-size: 10px;
+    left: 7px;
+    padding: 0 1px;
+}
+
+QLabel[klabCompact="true"],
+QCheckBox[klabCompact="true"],
+QRadioButton[klabCompact="true"],
+QPushButton[klabCompact="true"],
+QToolButton[klabCompact="true"],
+QComboBox[klabCompact="true"],
+QSpinBox[klabCompact="true"],
+QDoubleSpinBox[klabCompact="true"],
+QDateTimeEdit[klabCompact="true"],
+QLineEdit[klabCompact="true"],
+QTabBar[klabCompact="true"] {
+    font-size: 10px;
+}
+
+QPushButton[klabCompact="true"] {
+    padding: 0px 4px;
+    min-height: 15px;
+}
+
+QToolButton[klabCompact="true"] {
+    min-width: 20px;
+    min-height: 16px;
+}
+
+QComboBox[klabCompact="true"],
+QSpinBox[klabCompact="true"],
+QDoubleSpinBox[klabCompact="true"],
+QDateTimeEdit[klabCompact="true"],
+QLineEdit[klabCompact="true"] {
+    padding: 0px 3px;
+}
+
+QComboBox[klabCompact="true"]::drop-down {
+    width: 13px;
+}
+
+QSpinBox[klabCompact="true"]::up-button,
+QSpinBox[klabCompact="true"]::down-button,
+QDoubleSpinBox[klabCompact="true"]::up-button,
+QDoubleSpinBox[klabCompact="true"]::down-button {
+    width: 13px;
+}
+
+QTabBar[klabCompact="true"]::tab {
+    padding: 1px 5px;
 }
 
 QProgressBar {
