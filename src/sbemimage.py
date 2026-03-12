@@ -281,8 +281,8 @@ def main():
                         SBEMimage.setStyleSheet(f.read())
                     # Keep KLAB on a fixed readable baseline and solve fit
                     # issues through KLAB-only geometry/padding changes.
-                    font_pt = 11
-                    ui_font = QFont('Segoe UI')
+                    font_pt = 10
+                    ui_font = QFont('Segoe UI Variable Text')
                     ui_font.setPointSize(font_pt)
                     SBEMimage.setFont(ui_font)
                     install_klab_theme_polisher(SBEMimage)

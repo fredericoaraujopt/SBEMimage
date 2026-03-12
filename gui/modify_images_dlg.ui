@@ -42,7 +42,7 @@
   <widget class="QPushButton" name="pushButton_modify">
    <property name="geometry">
     <rect>
-     <x>190</x>
+     <x>186</x>
      <y>140</y>
      <width>75</width>
      <height>24</height>
@@ -55,8 +55,8 @@
   <widget class="QPushButton" name="pushButton_delete">
    <property name="geometry">
     <rect>
-     <x>100</x>
-     <y>180</y>
+     <x>98</x>
+     <y>140</y>
      <width>75</width>
      <height>24</height>
     </rect>
@@ -65,36 +65,10 @@
     <string>Delete</string>
    </property>
   </widget>
-  <widget class="QPushButton" name="pushButton_move_up">
-   <property name="geometry">
-    <rect>
-     <x>10</x>
-     <y>140</y>
-     <width>75</width>
-     <height>24</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>Move up</string>
-   </property>
-  </widget>
-  <widget class="QPushButton" name="pushButton_move_down">
-   <property name="geometry">
-    <rect>
-     <x>10</x>
-     <y>180</y>
-     <width>75</width>
-     <height>24</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>Move down</string>
-   </property>
-  </widget>
   <widget class="QPushButton" name="pushButton_import">
    <property name="geometry">
     <rect>
-     <x>100</x>
+     <x>10</x>
      <y>140</y>
      <width>75</width>
      <height>24</height>

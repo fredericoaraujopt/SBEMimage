@@ -38,9 +38,23 @@ class ImportedImage:
         self.enabled = enabled
         self.transparency = transparency
         self.is_array = is_array
-        self.source_kind = source_kind
+        self.source_kind = self._normalise_source_kind(
+            source_kind, description, image_src)
         self.pixmaps_ = {1: None, 2: None, 4: None, 8: None, 16: None}
         self.load_image()
+
+    @staticmethod
+    def _normalise_source_kind(source_kind, description, image_src):
+        if source_kind in ('stub_archive_sem', 'stub_archive_lm'):
+            return source_kind
+        if description.startswith('Stub archive SEM - '):
+            return 'stub_archive_sem'
+        if description.startswith('Stub archive LM - '):
+            return 'stub_archive_lm'
+        norm_path = os.path.normcase(image_src)
+        if ('overviews' + os.sep + 'stub' + os.sep) in norm_path:
+            return 'stub_archive_sem'
+        return source_kind
 
     def load_image(self):
         # Load image as QPixmap
@@ -111,7 +125,10 @@ class ImportedImage:
 
     @property
     def is_stub_archive(self):
-        return self.source_kind in ('stub_archive_sem', 'stub_archive_lm')
+        return (
+            self.source_kind in ('stub_archive_sem', 'stub_archive_lm')
+            or self.description.startswith('Stub archive SEM - ')
+            or self.description.startswith('Stub archive LM - '))
 
 
 class ImportedImages(list):

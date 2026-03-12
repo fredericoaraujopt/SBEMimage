@@ -1,5 +1,5 @@
 from qtpy.QtCore import Qt
-from qtpy.QtWidgets import QComboBox, QDialog, QLabel, QPushButton
+from qtpy.QtWidgets import QComboBox, QDialog, QGroupBox, QPushButton
 from qtpy.uic import loadUi
 
 import utils
@@ -64,8 +64,44 @@ class OVSettingsDlg(QDialog):
             widget.move(widget.x(), widget.y() + delta)
 
     def _setup_imaging_condition_controls(self):
-        preset_delta = 118
-        save_as_delta = 30
+        dialog_width = max(self.width(), 248)
+        panel_left = 10
+        full_width = dialog_width - 20
+        panel_top = self.comboBox_bitDepth.y() + self.comboBox_bitDepth.height() + 10
+        panel_height = 138
+        shift_delta = panel_top + panel_height + 10 - self.label_oi.y()
+        self.resize(dialog_width, self.height() + shift_delta)
+
+        self.groupBox_savedImagingSettings = QGroupBox(
+            'Saved imaging settings', self)
+        self.groupBox_savedImagingSettings.setGeometry(
+            panel_left, panel_top, full_width, panel_height)
+        inner_left = 10
+        inner_width = full_width - 20
+        apply_width = 118
+        manage_width = inner_width - apply_width - 8
+
+        self.pushButton_saveCurrentImagingConditionAs = QPushButton(
+            'Save current settings as...', self.groupBox_savedImagingSettings)
+        self.pushButton_saveCurrentImagingConditionAs.setGeometry(
+            inner_left, 22, inner_width, 23)
+        self.comboBox_savedImagingCondition = QComboBox(
+            self.groupBox_savedImagingSettings)
+        self.comboBox_savedImagingCondition.setGeometry(
+            inner_left, 51, inner_width, 22)
+        self.pushButton_applySavedImagingCondition = QPushButton(
+            'Apply saved settings', self.groupBox_savedImagingSettings)
+        self.pushButton_applySavedImagingCondition.setGeometry(
+            inner_left, 79, apply_width, 23)
+        self.pushButton_manageImagingConditions = QPushButton(
+            'Manage...', self.groupBox_savedImagingSettings)
+        self.pushButton_manageImagingConditions.setGeometry(
+            inner_left + apply_width + 8, 79, manage_width, 23)
+        self.pushButton_getFromSEM = QPushButton(
+            'Get current settings from SEM', self.groupBox_savedImagingSettings)
+        self.pushButton_getFromSEM.setGeometry(
+            inner_left, 108, inner_width, 23)
+
         self._shift_widgets_y(
             [
                 self.label_oi,
@@ -83,44 +119,24 @@ class OVSettingsDlg(QDialog):
                 self.pushButton_deleteOV,
                 self.buttonBox,
             ],
-            preset_delta)
-        self._shift_widgets_y(
-            [
-                self.pushButton_addOV,
-                self.pushButton_deleteOV,
-                self.buttonBox,
-            ],
-            save_as_delta)
-        self.resize(self.width(), self.height() + preset_delta + save_as_delta)
+            shift_delta)
 
-        left_x = self.pushButton_save.x()
-        full_width = self.pushButton_save.width()
-        sem_button_y = self.comboBox_bitDepth.y() + self.comboBox_bitDepth.height() + 8
-        self.pushButton_getFromSEM = QPushButton(
-            'Get current settings from SEM', self)
-        self.pushButton_getFromSEM.setGeometry(left_x, sem_button_y, full_width, 23)
-        self.label_savedImagingCondition = QLabel(
-            'Saved imaging condition:', self)
-        self.label_savedImagingCondition.setGeometry(
-            left_x, sem_button_y + 31, full_width, 18)
-        self.comboBox_savedImagingCondition = QComboBox(self)
-        self.comboBox_savedImagingCondition.setGeometry(
-            left_x, sem_button_y + 51, full_width, 22)
-        self.pushButton_applySavedImagingCondition = QPushButton(
-            'Apply saved settings', self)
-        self.pushButton_applySavedImagingCondition.setGeometry(
-            left_x, sem_button_y + 81, 116, 23)
-        self.pushButton_manageImagingConditions = QPushButton(
-            'Manage...', self)
-        self.pushButton_manageImagingConditions.setGeometry(
-            left_x + 124, sem_button_y + 81, 77, 23)
-        self.pushButton_saveCurrentImagingConditionAs = QPushButton(
-            'Save current settings as...', self)
-        self.pushButton_saveCurrentImagingConditionAs.setGeometry(
-            self.pushButton_save.x(),
-            self.pushButton_save.y() + 30,
-            self.pushButton_save.width(),
-            23)
+        self.label_expl1.setGeometry(10, self.label_expl1.y(), full_width, self.label_expl1.height())
+        self.label_expl2.setGeometry(10, self.label_expl2.y(), full_width, self.label_expl2.height())
+        self.pushButton_clearViewportImage.setGeometry(
+            10, self.pushButton_clearViewportImage.y(), full_width,
+            self.pushButton_clearViewportImage.height())
+        self.line.setGeometry(10, self.line.y(), full_width, self.line.height())
+        self.pushButton_save.setGeometry(
+            10, self.pushButton_save.y(), full_width, self.pushButton_save.height())
+        half_width = int((full_width - 8) / 2)
+        self.pushButton_addOV.setGeometry(
+            10, self.pushButton_addOV.y(), half_width, self.pushButton_addOV.height())
+        self.pushButton_deleteOV.setGeometry(
+            18 + half_width, self.pushButton_deleteOV.y(),
+            full_width - half_width - 8, self.pushButton_deleteOV.height())
+        self.buttonBox.move(int((dialog_width - self.buttonBox.width()) / 2),
+                            self.buttonBox.y())
 
         adapter = OverviewImagingConditionAdapter(self, self.sem)
         self.imaging_condition_controller = ImagingConditionController(

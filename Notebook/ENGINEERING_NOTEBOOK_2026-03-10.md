@@ -346,8 +346,8 @@ Expected result:
 - [x] If a stage read can be safely made unavailable or forced to fail, confirm the dialog shows a warning instead of writing invalid coordinates into the centre fields.
 
 Expected result:
-- [ ] Operators can centre a stub overview at the live stage position without manually copying X/Y values into the dialog.
-- [ ] The button reduces coordinate-entry friction but does not bypass stage-read failure visibility.
+- [x] Operators can centre a stub overview at the live stage position without manually copying X/Y values into the dialog.
+- [x] The button reduces coordinate-entry friction but does not bypass stage-read failure visibility.
 
 ### G. Preview-only grids stay visible while panning or dragging
 

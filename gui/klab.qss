@@ -8,7 +8,7 @@ QMainWindow, QDialog {
 }
 
 QWidget {
-    font-family: "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Aptos", "Tahoma", sans-serif;
 }
 
 /* Keep KLAB text readable; prefer width/spacing adjustments over font shrinking. */
@@ -133,7 +133,6 @@ QTabBar::tab {
 
 QTabBar::tab:selected {
     background-color: rgba(255, 255, 255, 0.98);
-    font-weight: 600;
 }
 
 QTabBar::tab:disabled {

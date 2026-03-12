@@ -27,11 +27,11 @@ from statistics import mean
 from qtpy.uic import loadUi
 from qtpy.QtWidgets import QWidget, QApplication, QMessageBox, QMenu, \
                            QFrame, QHBoxLayout, QLabel, QToolButton, \
-                           QCheckBox, QPushButton, \
+                           QCheckBox, QPushButton, QSizePolicy, \
                            QFileDialog
 from qtpy.QtGui import QPixmap, QPainter, QColor, QFont, QIcon, QPen, \
                        QBrush, QKeyEvent, QFontMetrics, QTransform
-from qtpy.QtCore import Qt, QObject, QRect, QRectF, QPointF, QSize
+from qtpy.QtCore import Qt, QObject, QRect, QRectF, QPointF, QSize, QTimer
 
 import acq_func
 import constants
@@ -131,6 +131,7 @@ class Viewport(QWidget):
         self.selected_imported = None
         self.ov_queue_dlg = None
         self.acquisition_manager_dlg = None
+        self._acquisition_manager_refresh_pending = False
         self._vp_grid_acq_in_progress = False
         self._vp_grid_acq_index = None
         self._vp_acq_state_backup = None
@@ -174,9 +175,11 @@ class Viewport(QWidget):
     def _load_gui(self):
         loadUi('gui/viewport.ui', self)
         self.setFocusPolicy(Qt.StrongFocus)
+        self.label_mousePos.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._setup_viewport_selector_controls()
         self._setup_viewport_display_controls()
         self._setup_polygon_toolbar()
+        self._ensure_viewport_display_space()
         self._layout_viewport_selector_controls()
         self._layout_viewport_display_controls()
         if self.use_klab_ui:
@@ -217,22 +220,19 @@ class Viewport(QWidget):
         self._rebuild_polygon_toolbar()
 
     def _setup_viewport_selector_controls(self):
-        if hasattr(self, 'pushButton_acquisitionManager'):
-            return
-        self.pushButton_acquisitionManager = QPushButton(
-            'Acquisition manager', self.frame)
-        self.pushButton_acquisitionManager.setObjectName(
-            'pushButton_acquisitionManager')
-        self.pushButton_acquisitionManager.setToolTip(
-            'Open the acquisition manager for grouped overview and grid control.')
+        return
 
     def _layout_viewport_selector_controls(self, combo_margin=10, combo_gap=8,
                                            min_selector_width=96,
                                            min_secondary_width=108):
-        if not hasattr(self, 'pushButton_acquisitionManager'):
-            return
-
         frame1_width = self.frame.width()
+        combo_y = self.comboBox_gridSelectorVP.y()
+        combo_height = self.comboBox_gridSelectorVP.height()
+        mouse_line_height = self.label_mousePos.fontMetrics().lineSpacing()
+        mouse_y = max(self.label_mousePos.y(), combo_y + combo_height + 6)
+        mouse_height = min(
+            max(18, mouse_line_height + 2),
+            max(18, self.frame.height() - mouse_y - 2))
         selector_width = max(
             min_selector_width,
             QFontMetrics(self.comboBox_gridSelectorVP.font()).horizontalAdvance(
@@ -252,24 +252,47 @@ class Viewport(QWidget):
             tile_x, self.comboBox_tilePreviewSelectorVP.y(),
             tile_width, self.comboBox_tilePreviewSelectorVP.height())
 
-        button_metrics = QFontMetrics(self.pushButton_acquisitionManager.font())
-        button_width = max(
-            132,
-            button_metrics.horizontalAdvance('Acquisition manager') + 24)
-        button_width = min(
-            button_width,
-            max(108, frame1_width - 120))
-        button_y = max(
-            self.comboBox_gridSelectorVP.y() + self.comboBox_gridSelectorVP.height() + 5,
-            self.label_mousePos.y() - 2)
-        self.pushButton_acquisitionManager.setGeometry(
-            combo_margin, button_y,
-            button_width, self.pushButton_acquisitionManager.sizeHint().height())
-        mouse_x = self.pushButton_acquisitionManager.x() + button_width + combo_gap
+        if hasattr(self, 'pushButton_acquisitionManager'):
+            button_metrics = QFontMetrics(self.pushButton_acquisitionManager.font())
+            button_width = max(
+                132,
+                button_metrics.horizontalAdvance('Acquisition manager') + 24)
+            button_width = min(
+                button_width,
+                max(108, frame1_width - 120))
+            button_y = max(
+                self.comboBox_gridSelectorVP.y() + self.comboBox_gridSelectorVP.height() + 5,
+                self.label_mousePos.y() - 2)
+            self.pushButton_acquisitionManager.setGeometry(
+                combo_margin, button_y,
+                button_width, self.pushButton_acquisitionManager.sizeHint().height())
+            mouse_x = self.pushButton_acquisitionManager.x() + button_width + combo_gap
+        else:
+            mouse_x = combo_margin
         self.label_mousePos.setGeometry(
-            mouse_x, self.label_mousePos.y(),
+            mouse_x, mouse_y,
             max(54, frame1_width - mouse_x - combo_margin),
-            self.label_mousePos.height())
+            mouse_height)
+
+    def _format_mouse_position_text(self, sx, sy, dx, dy):
+        full_text = (
+            'Stage: {0:.1f}, {1:.1f}; SEM: {2:.1f}, {3:.1f}'
+            .format(sx, sy, dx, dy))
+        variants = [
+            full_text,
+            'Stg: {0:.1f}, {1:.1f}; SEM: {2:.1f}, {3:.1f}'
+            .format(sx, sy, dx, dy),
+            'Stg {0:.1f},{1:.1f} | SEM {2:.1f},{3:.1f}'
+            .format(sx, sy, dx, dy),
+            'Stg {0:.0f},{1:.0f} | SEM {2:.0f},{3:.0f}'
+            .format(sx, sy, dx, dy),
+        ]
+        available_width = max(24, self.label_mousePos.contentsRect().width() - 2)
+        metrics = self.label_mousePos.fontMetrics()
+        for candidate in variants:
+            if metrics.horizontalAdvance(candidate) <= available_width:
+                return candidate, full_text
+        return metrics.elidedText(variants[-1], Qt.ElideRight, available_width), full_text
 
     def _setup_viewport_display_controls(self):
         if hasattr(self, 'checkBox_showGridLines'):
@@ -277,7 +300,7 @@ class Viewport(QWidget):
         self.checkBox_showGridLines = QCheckBox('Show grid lines', self.frame_3)
         self.checkBox_showGridLines.setObjectName('checkBox_showGridLines')
         self.checkBox_showGridLines.setToolTip(
-            'Show or hide grid outlines in the Viewport. Shortcut: H')
+            'Show or hide grid outlines in the Viewport. Shortcut: H toggles both grid lines and labels.')
 
     def _layout_viewport_display_controls(self, combo_margin=10):
         if not hasattr(self, 'checkBox_showGridLines'):
@@ -285,63 +308,56 @@ class Viewport(QWidget):
 
         frame3_width = self.frame_3.width()
         help_margin = 8
-        row_gap = 6
         metrics = QFontMetrics(self.checkBox_showStagePos.font())
-        row1_y = self.checkBox_showAxes.y()
-        row2_y = self.checkBox_showLabels.y()
-        row3_y = self.checkBox_showStagePos.y()
-        grid_toggle_height = self.checkBox_showGridLines.height()
-        axes_toggle_height = self.checkBox_showAxes.height()
-
-        if self.use_klab_ui:
-            # Match the native viewport checkbox row rhythm so the added KLAB
-            # grid-lines toggle does not overlap the existing rows.
-            grid_toggle_height = self.checkBox_showLabels.height()
-            axes_toggle_height = self.checkBox_showLabels.height()
-            row_spacing = row3_y - row2_y
-            if row_spacing > 0:
-                row1_y = row2_y - row_spacing
-
-        show_grid_width = metrics.horizontalAdvance('Show grid lines') + 26
-        show_axes_width = metrics.horizontalAdvance('Show axes') + 26
-        left_col_width = max(
-            show_grid_width + row_gap + show_axes_width,
-            metrics.horizontalAdvance('Show labels') + 26,
-            metrics.horizontalAdvance('Show stage position') + 26)
-        left_col_width = min(left_col_width, 210)
+        toggle_width = max(
+            metrics.horizontalAdvance('Show grid lines'),
+            metrics.horizontalAdvance('Show labels'),
+            metrics.horizontalAdvance('Show stage position'),
+            metrics.horizontalAdvance('Show axes')) + 28
+        toggle_width = min(toggle_width, 156 if self.use_klab_ui else 166)
+        row_positions = (6, 24, 42, 60)
+        checkbox_height = self.checkBox_showLabels.height()
 
         self.checkBox_showGridLines.setGeometry(
-            combo_margin, row1_y,
-            show_grid_width, grid_toggle_height)
-        self.checkBox_showAxes.setGeometry(
-            combo_margin + show_grid_width + row_gap, row1_y,
-            show_axes_width, axes_toggle_height)
+            combo_margin, row_positions[0], toggle_width, checkbox_height)
         self.checkBox_showLabels.setGeometry(
-            combo_margin, row2_y,
-            left_col_width, self.checkBox_showLabels.height())
+            combo_margin, row_positions[1], toggle_width, checkbox_height)
         self.checkBox_showStagePos.setGeometry(
-            combo_margin, row3_y,
-            left_col_width, self.checkBox_showStagePos.height())
+            combo_margin, row_positions[2], toggle_width, checkbox_height)
+        self.checkBox_showAxes.setGeometry(
+            combo_margin, row_positions[3], toggle_width, checkbox_height)
 
         self.pushButton_helpViewport.move(
             frame3_width - self.pushButton_helpViewport.width() - help_margin,
-            self.pushButton_helpViewport.y())
+            row_positions[2] - 2)
 
-        slider_x = left_col_width + 20
+        slider_label_x = combo_margin + toggle_width + (18 if self.use_klab_ui else 16)
+        slider_x = slider_label_x + 40
         slider_width = max(
-            120,
+            108 if self.use_klab_ui else 118,
             self.pushButton_helpViewport.x() - slider_x - 8)
-        self.label_4.move(
-            max(combo_margin, slider_x - self.label_4.width() - 6),
-            self.label_4.y())
+        self.label_4.move(slider_label_x, row_positions[0] + 2)
         self.horizontalSlider_VP.setGeometry(
-            slider_x, self.horizontalSlider_VP.y(),
+            slider_x, row_positions[0] - 1,
             slider_width, self.horizontalSlider_VP.height())
-        self.label_6.move(slider_x, self.label_6.y())
+        self.label_6.move(slider_label_x, row_positions[2] + 1)
         self.label_FOVSize.setGeometry(
-            slider_x + 32, self.label_FOVSize.y(),
-            max(90, self.pushButton_helpViewport.x() - (slider_x + 32) - 8),
+            slider_label_x + 32, row_positions[2] + 1,
+            max(86, self.pushButton_helpViewport.x() - (slider_label_x + 32) - 8),
             self.label_FOVSize.height())
+
+    def _ensure_viewport_display_space(self):
+        if getattr(self, '_viewport_display_space_applied', False):
+            return
+        extra_height = 18
+        self._viewport_display_space_applied = True
+        self.resize(self.width(), self.height() + extra_height)
+        self.setMinimumHeight(self.minimumHeight() + extra_height)
+        self.groupBox.setMinimumHeight(self.groupBox.minimumHeight() + extra_height)
+        self.groupBox.setMaximumHeight(self.groupBox.maximumHeight() + extra_height)
+        self.frame_3.setGeometry(
+            self.frame_3.x(), self.frame_3.y(),
+            self.frame_3.width(), self.frame_3.height() + extra_height)
 
     def _layout_polygon_toolbar(self):
         if not hasattr(self, 'frame_polygonTools'):
@@ -354,6 +370,7 @@ class Viewport(QWidget):
 
     def apply_klab_viewport_geometry_tweaks(self):
         """Adjust viewport controls for KLAB theme readability."""
+        self._ensure_viewport_display_space()
         combo_margin = 10
         combo_gap = 8
         min_selector_width = 96
@@ -401,7 +418,8 @@ class Viewport(QWidget):
         self._clear_polygon_toolbar_layout()
 
         label = QLabel('ROI')
-        label.setMinimumWidth(26)
+        label.setFixedWidth(26)
+        label.setProperty('klabFixedMetrics', True)
         self.frame_polygonToolsLayout.addWidget(label)
 
         default_buttons = [
@@ -411,9 +429,8 @@ class Viewport(QWidget):
             ('Draw your own', polygon_roi.CUSTOM_SHAPE_TYPE),
         ]
         for text, key in default_buttons:
-            button = QToolButton(self.frame_polygonTools)
-            button.setText(text)
-            button.setCheckable(True)
+            button = self._create_fixed_polygon_toolbar_button(
+                text, checkable=True)
             button.clicked.connect(
                 lambda checked, button_key=key:
                     self._vp_toggle_polygon_tool(button_key, checked))
@@ -422,9 +439,8 @@ class Viewport(QWidget):
 
         for index, shape in enumerate(self.polygon_shape_library):
             key = f'imported::{index}'
-            button = QToolButton(self.frame_polygonTools)
-            button.setText(shape['name'])
-            button.setCheckable(True)
+            button = self._create_fixed_polygon_toolbar_button(
+                shape['name'], checkable=True)
             button.clicked.connect(
                 lambda checked, button_key=key:
                     self._vp_toggle_polygon_tool(button_key, checked))
@@ -433,14 +449,12 @@ class Viewport(QWidget):
 
         self.frame_polygonToolsLayout.addStretch(1)
 
-        import_button = QToolButton(self.frame_polygonTools)
-        import_button.setText('Import')
+        import_button = self._create_fixed_polygon_toolbar_button('Import')
         import_button.clicked.connect(self._vp_import_polygon_shape)
         self.frame_polygonToolsLayout.addWidget(import_button)
         self.pushButton_importPolygon = import_button
 
-        delete_button = QToolButton(self.frame_polygonTools)
-        delete_button.setText('Delete SVG')
+        delete_button = self._create_fixed_polygon_toolbar_button('Delete SVG')
         delete_button.clicked.connect(self._vp_delete_imported_polygon_shape)
         delete_button.setEnabled(False)
         delete_button.setToolTip(
@@ -449,6 +463,18 @@ class Viewport(QWidget):
         self.pushButton_deleteImportedPolygon = delete_button
 
         self._sync_polygon_toolbar_buttons()
+
+    def _create_fixed_polygon_toolbar_button(self, text, checkable=False):
+        button = QToolButton(self.frame_polygonTools)
+        button.setText(text)
+        button.setCheckable(checkable)
+        metrics = QFontMetrics(button.font())
+        button_width = max(68, metrics.horizontalAdvance(text) + 22)
+        button.setFixedWidth(button_width)
+        button.setFixedHeight(24)
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        button.setProperty('klabFixedMetrics', True)
+        return button
 
     def _sync_polygon_toolbar_buttons(self):
         active_key = None
@@ -629,14 +655,8 @@ class Viewport(QWidget):
 
     def _vp_grid_render_flags(self, suppress_previews=False):
         """Return effective grid-layer visibility flags for the viewport."""
-        if self.vp_tile_preview_mode == 0:   # No previews, only show grid lines
-            show_grid, show_previews, with_gaps = True, False, False
-        elif self.vp_tile_preview_mode == 1: # Show previews with grid lines
+        if self.vp_tile_preview_mode == 1:   # Show previews with grid lines
             show_grid, show_previews, with_gaps = True, True, False
-        elif self.vp_tile_preview_mode == 2: # Show previews without grid lines
-            show_grid, show_previews, with_gaps = False, True, False
-        elif self.vp_tile_preview_mode == 3: # Show previews with gaps, no grid
-            show_grid, show_previews, with_gaps = False, True, True
         else:
             show_grid, show_previews, with_gaps = True, False, False
 
@@ -647,12 +667,9 @@ class Viewport(QWidget):
             or self.grid_drag_active)
         if previews_temporarily_suppressed and show_previews:
             # Tile previews are intentionally suppressed during interaction for
-            # responsiveness. In preview-only modes, fall back to grid outlines
-            # instead of blanking the grid layer entirely.
+            # responsiveness. Preserve the user's explicit grid-line toggle
+            # state instead of forcing outlines back on during panning.
             show_previews = False
-            if not show_grid:
-                show_grid = True
-                with_gaps = False
         return show_grid, show_previews, with_gaps
 
     def tab_changed(self):
@@ -665,7 +682,8 @@ class Viewport(QWidget):
         when an acquisition is running."""
         self.busy = busy
         idle = not busy
-        self.pushButton_acquisitionManager.setEnabled(idle)
+        if hasattr(self, 'pushButton_acquisitionManager'):
+            self.pushButton_acquisitionManager.setEnabled(idle)
         self.pushButton_refreshOVs.setEnabled(idle)
         self.pushButton_acquireStubOV.setEnabled(idle)
         if idle:
@@ -1164,13 +1182,14 @@ class Viewport(QWidget):
                 and mouse_pos_within_viewer):
             sx, sy = self.cs.convert_mouse_to_s((px, py))
             dx, dy = self.cs.convert_s_to_d([sx, sy])
-            self.label_mousePos.setText(
-                'Stage: {0:.1f}, '.format(sx)
-                + '{0:.1f}; '.format(sy)
-                + 'SEM: {0:.1f}, '.format(dx)
-                + '{0:.1f}'.format(dy))
+            display_text, full_text = self._format_mouse_position_text(
+                sx, sy, dx, dy)
+            self.label_mousePos.setText(display_text)
+            self.label_mousePos.setToolTip(
+                full_text if display_text != full_text else '')
         else:
             self.label_mousePos.setText('-')
+            self.label_mousePos.setToolTip('')
 
         # Move grid/OV or FOV:
         if self.vp_polygon_handle_drag is not None:
@@ -1510,6 +1529,8 @@ class Viewport(QWidget):
                 self._vp_disarm_polygon_tool()
             elif modifiers == Qt.NoModifier and event.key() == Qt.Key_H:
                 self.vp_toggle_show_grid_lines_shortcut()
+            elif modifiers == Qt.NoModifier and event.key() == Qt.Key_G:
+                self.vp_toggle_tile_previews_shortcut()
             elif event.key() == Qt.Key_Delete:
                 self._vp_delete_selected_grid()
             elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_C:
@@ -2089,8 +2110,8 @@ class Viewport(QWidget):
         # overview indices.
         self.vp_current_grid = int(self.cfg['viewport']['vp_current_grid'])
         self.vp_current_ov = int(self.cfg['viewport']['vp_current_ov'])
-        self.vp_tile_preview_mode = int(
-            self.cfg['viewport']['vp_tile_preview_mode'])
+        self.vp_tile_preview_mode = self._normalize_tile_preview_mode(
+            int(self.cfg['viewport']['vp_tile_preview_mode']))
         # display options
         self.show_stub_ov = (
             self.cfg['viewport']['show_stub_ov'].lower() == 'true')
@@ -2149,8 +2170,9 @@ class Viewport(QWidget):
         self.vp_qp = QPainter()
 
         # Buttons
-        self.pushButton_acquisitionManager.clicked.connect(
-            self.vp_open_acquisition_manager)
+        if hasattr(self, 'pushButton_acquisitionManager'):
+            self.pushButton_acquisitionManager.clicked.connect(
+                self.vp_open_acquisition_manager)
         self.pushButton_refreshOVs.clicked.connect(self.vp_acquire_overview)
         self.pushButton_acquireStubOV.clicked.connect(
             self._vp_open_stub_overview_dlg)
@@ -2176,9 +2198,7 @@ class Viewport(QWidget):
         # Tile Preview selector:
         self.comboBox_tilePreviewSelectorVP.addItems(
             ['Hide tile previews',
-             'Show tile previews',
-             'Tile previews, no grid(s)',
-             'Tile previews with gaps'])
+             'Show tile previews'])
         self.comboBox_tilePreviewSelectorVP.setCurrentIndex(
             self.vp_tile_preview_mode)
         self.comboBox_tilePreviewSelectorVP.currentIndexChanged.connect(
@@ -2234,25 +2254,13 @@ class Viewport(QWidget):
         self.comboBox_OVSelectorVP.blockSignals(False)
 
     def vp_change_tile_preview_mode(self):
-        prev_vp_tile_preview_mode = self.vp_tile_preview_mode
-        self.vp_tile_preview_mode = (
+        self.vp_tile_preview_mode = self._normalize_tile_preview_mode(
             self.comboBox_tilePreviewSelectorVP.currentIndex())
-        if self.vp_tile_preview_mode == 3:  # show tiles with gaps
-            # Hide OVs to make sure that gaps are visible
-            self.comboBox_OVSelectorVP.blockSignals(True)
-            self.comboBox_OVSelectorVP.setCurrentIndex(0)
-            self.vp_current_ov = -2
-            self.comboBox_OVSelectorVP.blockSignals(False)
-            # Also hide stub OV
-            self.show_stub_ov = False
-            self.checkBox_showStubOV.setChecked(False)
-        elif prev_vp_tile_preview_mode == 3:
-            # When switching back from view with gaps, show OVs again
-            self.comboBox_OVSelectorVP.blockSignals(True)
-            self.comboBox_OVSelectorVP.setCurrentIndex(1)
-            self.vp_current_ov = -1
-            self.comboBox_OVSelectorVP.blockSignals(False)
         self.vp_draw()
+
+    @staticmethod
+    def _normalize_tile_preview_mode(mode):
+        return 1 if int(mode) > 0 else 0
 
     def vp_change_grid_selection(self):
         self.vp_current_grid = self.comboBox_gridSelectorVP.currentIndex() - 2
@@ -2277,10 +2285,26 @@ class Viewport(QWidget):
     def vp_toggle_show_grid_lines_shortcut(self):
         if self.tabWidget.currentIndex() != 0:
             return
-        self.show_grid_lines = not self.show_grid_lines
+        new_state = not (self.show_grid_lines or self.show_labels)
+        self.show_grid_lines = new_state
+        self.show_labels = new_state
         self.checkBox_showGridLines.blockSignals(True)
         self.checkBox_showGridLines.setChecked(self.show_grid_lines)
         self.checkBox_showGridLines.blockSignals(False)
+        self.checkBox_showLabels.blockSignals(True)
+        self.checkBox_showLabels.setChecked(self.show_labels)
+        self.checkBox_showLabels.blockSignals(False)
+        self.vp_draw()
+
+    def vp_toggle_tile_previews_shortcut(self):
+        if self.tabWidget.currentIndex() != 0:
+            return
+        self.vp_tile_preview_mode = 1 - self._normalize_tile_preview_mode(
+            self.vp_tile_preview_mode)
+        self.comboBox_tilePreviewSelectorVP.blockSignals(True)
+        self.comboBox_tilePreviewSelectorVP.setCurrentIndex(
+            self.vp_tile_preview_mode)
+        self.comboBox_tilePreviewSelectorVP.blockSignals(False)
         self.vp_draw()
 
     def vp_toggle_show_stub_ov(self):
@@ -2328,6 +2352,15 @@ class Viewport(QWidget):
             self.ov_queue_dlg.refresh_table()
 
     def _refresh_acquisition_manager(self):
+        if (self.acquisition_manager_dlg is None
+                or not self.acquisition_manager_dlg.isVisible()
+                or self._acquisition_manager_refresh_pending):
+            return
+        self._acquisition_manager_refresh_pending = True
+        QTimer.singleShot(0, self._perform_acquisition_manager_refresh)
+
+    def _perform_acquisition_manager_refresh(self):
+        self._acquisition_manager_refresh_pending = False
         if (self.acquisition_manager_dlg is not None
                 and self.acquisition_manager_dlg.isVisible()):
             self.acquisition_manager_dlg.refresh_view()
@@ -3104,7 +3137,13 @@ class Viewport(QWidget):
             return
         try:
             self.vp_qp.setRenderHint(QPainter.Antialiasing, self.render_antialias)
-            # First, show stub OV if option selected and stub OV image exists:
+            # First, show imported images as the background layer.
+            if self.show_imported:
+                for imported_img_index in range(len(self.imported)):
+                    if self._vp_imported_visible(imported_img_index):
+                        self._vp_place_imported_img(imported_img_index)
+
+            # Then, show stub OV if option selected and stub OV image exists:
             if self.show_stub_ov:
                 for imported_img_index in range(len(self.imported)):
                     if self._vp_imported_visible(imported_img_index):
@@ -3141,12 +3180,6 @@ class Viewport(QWidget):
                                     show_previews,
                                     with_gaps,
                                     suppress_labels)
-
-            # Finally, show imported images
-            if self.show_imported:
-                for imported_img_index in range(len(self.imported)):
-                    if self._vp_imported_visible(imported_img_index):
-                        self._vp_place_imported_img(imported_img_index)
             # Show stage boundaries (motor range limits)
             self._vp_draw_stage_boundaries()
             if self.show_axes:
@@ -3651,9 +3684,7 @@ class Viewport(QWidget):
             # TODO: Reconsider this after refactoring complete.
             suppress_labels = (
                 (self.gm.number_grids + self.ovm.number_ov) > 10
-                and (self.cs.vp_scale < 1.0
-                     or self.fov_drag_active
-                     or self.grid_drag_active))
+                and self.cs.vp_scale < 1.0)
 
         # Crop and resize OV before placing it.
         visible, crop_area, vx_cropped, vy_cropped = self._vp_visible_area(
@@ -3883,11 +3914,8 @@ class Viewport(QWidget):
         grid_colour = QColor(*grid_colour_rgba)
         indicator_colour = QColor(*constants.COLOUR_SELECTOR[12])
 
-        # Suppress labels when moving a grid or panning the view
-        # or when in array mode unless zoomed in
-        if ((self.gm.array_mode and self.cs.vp_scale < 1)
-                or self.fov_drag_active
-                or self.grid_drag_active):
+        # In dense array mode, labels remain suppressed when zoomed far out.
+        if self.gm.array_mode and self.cs.vp_scale < 1:
             suppress_labels = True
 
         if grid.is_deferred_polygon_roi():
@@ -4035,11 +4063,8 @@ class Viewport(QWidget):
         grid_brush_transparent = QBrush(QColor(255, 255, 255, 0),
                                         Qt.SolidPattern)
 
-        # Suppress labels when moving a grid or panning the view
-        # or when in array mode unless zoomed in
-        if ((self.gm.array_mode and self.cs.vp_scale < 0.5)
-                or self.fov_drag_active
-                or self.grid_drag_active):
+        # In dense array mode, tile labels remain suppressed when zoomed far out.
+        if self.gm.array_mode and self.cs.vp_scale < 0.5:
             suppress_labels = True
 
         if ((tile_width_v * cols > 2 or tile_height_v * rows > 2)
@@ -4617,9 +4642,7 @@ class Viewport(QWidget):
             # Also check whether grid label clicked. This selects only the grid
             # and not a specific tile.
             suppress_labels = ((self.gm.number_grids + self.ovm.number_ov) > 10
-                               and (self.cs.vp_scale < 1.0
-                               or self.fov_drag_active
-                               or self.grid_drag_active))
+                               and self.cs.vp_scale < 1.0)
 
             if self.show_labels and (not suppress_labels):
                 f = int(self.cs.vp_scale * 8)

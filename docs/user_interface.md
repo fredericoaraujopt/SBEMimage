@@ -98,6 +98,9 @@ are shown in the foreground. You can choose whether to show or hide
 elements by using the controls at the bottom of the window. The visual
 scene can be panned by left-click dragging, and zoomed in and out with
 the mouse wheel or the zoom slider in the bottom-right corner. The
+tile-preview selector now switches only between `Hide tile previews`
+and `Show tile previews`, and the same preview visibility can be toggled
+quickly with the `G` key. The
 viewport may temporarily substitute lightweight grid outlines for tile
 previews during panning or drag interactions so grids remain visible
 without re-rendering full previews on every mouse move. The
@@ -141,6 +144,7 @@ mark.
 | `ctrl + left click drag`       | Move overview image to new position                                                                                                           |
 | `ctrl + alt + left click drag` | Move imported image to new position                                                                                                           |
 | `mouse wheel ↑/↓`              | Zoom in and out (in vieweport panel); Forward and backward through image series (in slice-by-slice panel)                                     |
+| `G`                            | Toggle tile previews between hidden and shown                                                                                                 |
 | `H`                            | Toggle grid lines between shown and hidden                                                                                                    |
 | `Measuring tool`               | Activate by clicking on measure button (ruler icon), then right-click on two different points between which you wish to measure the distance. |
 

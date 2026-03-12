@@ -7,7 +7,7 @@ font shrinking so KLAB text remains readable.
 
 import re
 
-from qtpy.QtCore import QObject, QEvent, QTimer
+from qtpy.QtCore import QObject, QEvent, Qt, QTimer
 from qtpy.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -27,6 +27,22 @@ from qtpy.QtWidgets import (
 
 
 HTML_TAG_RE = re.compile(r'<[^>]+>')
+
+try:
+    from PyQt5 import sip as qt_sip
+except Exception:
+    try:
+        from PyQt6 import sip as qt_sip
+    except Exception:
+        qt_sip = None
+
+try:
+    import shiboken6 as qt_shiboken
+except Exception:
+    try:
+        import shiboken2 as qt_shiboken
+    except Exception:
+        qt_shiboken = None
 
 
 class KLABThemePolisher(QObject):
@@ -50,9 +66,28 @@ class KLABThemePolisher(QObject):
                 QEvent.LayoutRequest,
                 QEvent.FontChange):
             root = obj.window()
-            if isinstance(root, QWidget) and root.isWindow():
+            if (isinstance(root, QWidget)
+                    and root.isWindow()
+                    and root.windowType() not in (Qt.ToolTip, Qt.Popup)
+                    and not isinstance(root, QLabel)):
                 self._queue_root(root)
         return False
+
+    @staticmethod
+    def _is_alive(widget):
+        if widget is None or not isinstance(widget, QWidget):
+            return False
+        try:
+            if qt_sip is not None and qt_sip.isdeleted(widget):
+                return False
+        except Exception:
+            return False
+        try:
+            if qt_shiboken is not None and not qt_shiboken.isValid(widget):
+                return False
+        except Exception:
+            return False
+        return True
 
     def _queue_root(self, root):
         root_id = id(root)
@@ -64,37 +99,49 @@ class KLABThemePolisher(QObject):
 
     def _polish_root(self, root, root_id):
         self._queued_roots.discard(root_id)
-        if root is None or not isinstance(root, QWidget):
+        if not self._is_alive(root):
             return
-        if root.property('_klab_polish_in_progress'):
+        try:
+            if root.property('_klab_polish_in_progress'):
+                return
+            root.setProperty('_klab_polish_in_progress', True)
+        except RuntimeError:
             return
-        root.setProperty('_klab_polish_in_progress', True)
         try:
             widgets = [root] + root.findChildren(QWidget)
             root_growth_needed = 0
             for widget in widgets:
-                if widget.width() <= 0:
+                if not self._is_alive(widget):
                     continue
-                overflow_width = self._overflow_width(widget)
-                desired_compact = overflow_width > 0
-                current_compact = bool(widget.property('klabCompact'))
-                if desired_compact == current_compact:
-                    pass
-                else:
-                    widget.setProperty('klabCompact', desired_compact)
-                    self._repolish(widget)
+                try:
+                    if widget.width() <= 0:
+                        continue
+                    overflow_width = self._overflow_width(widget)
+                    desired_compact = overflow_width > 0
+                    current_compact = bool(widget.property('klabCompact'))
+                    if desired_compact != current_compact:
+                        widget.setProperty('klabCompact', desired_compact)
+                        self._repolish(widget)
 
-                growth = self._expand_layout_widget(widget, overflow_width)
-                root_growth_needed = max(root_growth_needed, growth)
-            if root_growth_needed > 0:
+                    growth = self._expand_layout_widget(widget, overflow_width)
+                    root_growth_needed = max(root_growth_needed, growth)
+                except RuntimeError:
+                    continue
+            if root_growth_needed > 0 and self._is_alive(root):
                 self._expand_dialog_width(root, root_growth_needed)
         finally:
-            root.setProperty('_klab_polish_in_progress', False)
+            if self._is_alive(root):
+                try:
+                    root.setProperty('_klab_polish_in_progress', False)
+                except RuntimeError:
+                    pass
 
     def _needs_compact_metrics(self, widget):
         return self._overflow_width(widget) > 0
 
     def _overflow_width(self, widget):
+        if bool(widget.property('klabFixedMetrics')):
+            return 0
         if isinstance(widget, QGroupBox):
             return self._overflow_pixels(
                 widget, widget.title(), widget.width() - 22, extra_padding=8)
@@ -169,6 +216,8 @@ class KLABThemePolisher(QObject):
         return layout.indexOf(widget) != -1
 
     def _expand_layout_widget(self, widget, overflow_width):
+        if bool(widget.property('klabFixedMetrics')):
+            return 0
         if overflow_width <= 0 or not self._is_layout_managed(widget):
             return 0
         desired_width = max(
@@ -208,6 +257,8 @@ class KLABThemePolisher(QObject):
 
     @staticmethod
     def _repolish(widget):
+        if widget is None:
+            return
         style = widget.style()
         style.unpolish(widget)
         style.polish(widget)

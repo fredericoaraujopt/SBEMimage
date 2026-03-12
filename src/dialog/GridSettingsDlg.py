@@ -2,7 +2,7 @@ import numpy as np
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QPixmap, QColor, QIcon
-from qtpy.QtWidgets import QComboBox, QDialog, QLabel, QMessageBox, QPushButton
+from qtpy.QtWidgets import QComboBox, QDialog, QGroupBox, QMessageBox, QPushButton
 from qtpy.uic import loadUi
 
 import constants
@@ -96,8 +96,40 @@ class GridSettingsDlg(QDialog):
             widget.move(widget.x(), widget.y() + delta)
 
     def _setup_imaging_condition_controls(self):
-        preset_delta = 54
-        save_as_delta = 30
+        panel_top = self.groupBox_geometry.y() + self.groupBox_geometry.height() + 8
+        panel_height = 138
+        shift_delta = panel_top + panel_height + 10 - self.groupBox_2.y()
+        self.resize(self.width(), self.height() + shift_delta)
+
+        self.groupBox_savedImagingSettings = QGroupBox(
+            'Saved imaging settings', self)
+        self.groupBox_savedImagingSettings.setGeometry(
+            10, panel_top, self.groupBox_geometry.width(), panel_height)
+        inner_left = 10
+        inner_width = self.groupBox_savedImagingSettings.width() - 20
+        apply_width = 136
+        manage_width = inner_width - apply_width - 8
+
+        self.pushButton_saveCurrentImagingConditionAs = QPushButton(
+            'Save current settings as...', self.groupBox_savedImagingSettings)
+        self.pushButton_saveCurrentImagingConditionAs.setGeometry(
+            inner_left, 22, inner_width, 23)
+        self.comboBox_savedImagingCondition = QComboBox(
+            self.groupBox_savedImagingSettings)
+        self.comboBox_savedImagingCondition.setGeometry(
+            inner_left, 51, inner_width, 22)
+        self.pushButton_applySavedImagingCondition = QPushButton(
+            'Apply saved settings', self.groupBox_savedImagingSettings)
+        self.pushButton_applySavedImagingCondition.setGeometry(
+            inner_left, 79, apply_width, 23)
+        self.pushButton_manageImagingConditions = QPushButton(
+            'Manage...', self.groupBox_savedImagingSettings)
+        self.pushButton_manageImagingConditions.setGeometry(
+            inner_left + apply_width + 8, 79, manage_width, 23)
+        self.pushButton_getFromSEM.setParent(self.groupBox_savedImagingSettings)
+        self.pushButton_getFromSEM.setGeometry(
+            inner_left, 108, inner_width, self.pushButton_getFromSEM.height())
+
         self._shift_widgets_y(
             [
                 self.groupBox_2,
@@ -108,40 +140,9 @@ class GridSettingsDlg(QDialog):
                 self.pushButton_deleteGrid,
                 self.buttonBox,
             ],
-            preset_delta)
-        self._shift_widgets_y(
-            [
-                self.pushButton_addGrid,
-                self.pushButton_deleteGrid,
-                self.buttonBox,
-            ],
-            save_as_delta)
-        self.resize(self.width(), self.height() + preset_delta + save_as_delta)
-
-        combo_width = self.pushButton_getFromSEM.width()
-        left_x = self.pushButton_getFromSEM.x()
-        block_y = self.pushButton_getFromSEM.y() + self.pushButton_getFromSEM.height() + 8
-        self.label_savedImagingCondition = QLabel(
-            'Saved imaging condition:', self)
-        self.label_savedImagingCondition.setGeometry(left_x, block_y, combo_width, 18)
-        self.comboBox_savedImagingCondition = QComboBox(self)
-        self.comboBox_savedImagingCondition.setGeometry(
-            left_x, block_y + 20, combo_width, 22)
-        self.pushButton_applySavedImagingCondition = QPushButton(
-            'Apply saved settings', self)
-        self.pushButton_applySavedImagingCondition.setGeometry(
-            left_x, block_y + 50, 136, 23)
-        self.pushButton_manageImagingConditions = QPushButton(
-            'Manage...', self)
-        self.pushButton_manageImagingConditions.setGeometry(
-            left_x + 144, block_y + 50, 77, 23)
-        self.pushButton_saveCurrentImagingConditionAs = QPushButton(
-            'Save current settings as...', self)
-        self.pushButton_saveCurrentImagingConditionAs.setGeometry(
-            self.pushButton_save.x(),
-            self.pushButton_save.y() + 30,
-            self.pushButton_save.width(),
-            23)
+            shift_delta)
+        self.buttonBox.move(int((self.width() - self.buttonBox.width()) / 2),
+                            self.buttonBox.y())
 
         adapter = GridImagingConditionAdapter(self, self.sem)
         self.imaging_condition_controller = ImagingConditionController(

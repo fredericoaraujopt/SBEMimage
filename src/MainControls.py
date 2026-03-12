@@ -29,7 +29,7 @@ from time import sleep
 #import copy
 #import xml.etree.ElementTree as ET
 
-from qtpy.QtWidgets import QApplication, QMainWindow, QMessageBox, QInputDialog, QLineEdit, \
+from qtpy.QtWidgets import QApplication, QMainWindow, QMessageBox, QInputDialog, QLineEdit, QWidget, \
                             QAbstractItemView, QPushButton, QProgressDialog, QFileDialog, QHeaderView, \
                             QAction
 from qtpy.QtCore import Qt, QRect, QSize, QEvent, QItemSelection, QItemSelectionModel
@@ -404,6 +404,8 @@ class MainControls(QMainWindow):
                                  self.acq_groups,
                                  use_klab_ui=self.use_klab_ui)
         self.viewport.show()
+        if hasattr(self, 'pushButton_acquisitionManagerMain'):
+            self.pushButton_acquisitionManagerMain.setEnabled(True)
 
         # Draw the viewport canvas
         self.viewport.vp_draw()
@@ -507,6 +509,8 @@ class MainControls(QMainWindow):
     def initialize_main_controls_gui(self):
         """Load and set up the Main Controls GUI"""
         loadUi('gui/main_window.ui', self)
+        self._ensure_acquisition_manager_button()
+        self._ensure_stack_acquisition_row_space()
         if self.use_klab_ui:
             self._klab_capture_main_controls_label_texts()
             self.apply_klab_main_controls_width_tweak()
@@ -551,6 +555,9 @@ class MainControls(QMainWindow):
             self.open_acq_settings_dlg)
         self.pushButton_acqSettings.setIcon(QIcon('img/settings.png'))
         self.pushButton_acqSettings.setIconSize(QSize(16, 16))
+        self.pushButton_acquisitionManagerMain.clicked.connect(
+            self.open_acquisition_manager_from_main_controls)
+        self._layout_stack_header_for_current_ui()
         self.pushButton_setActiveUserFlag.clicked.connect(
             self.set_active_user_flag)
         self.pushButton_clearActiveUserFlag.clicked.connect(
@@ -756,10 +763,10 @@ class MainControls(QMainWindow):
         """Increase Main Controls width and distribute it across top panels."""
         try:
             extra_width = int(
-                self.cfg['sys'].get('klab_main_controls_extra_width', '128'))
+                self.cfg['sys'].get('klab_main_controls_extra_width', '120'))
         except Exception:
-            extra_width = 128
-        extra_width = max(128, min(extra_width, 360))
+            extra_width = 120
+        extra_width = max(120, min(extra_width, 320))
         if extra_width == 0:
             return
 
@@ -770,128 +777,146 @@ class MainControls(QMainWindow):
             self.tabWidget.setMinimumWidth(
                 self.tabWidget.minimumWidth() + extra_width)
         if hasattr(self, 'gridLayout'):
-            column_min_widths = (182, 194, 194, 156)
-            column_stretches = (19, 23, 23, 18)
+            column_min_widths = (170, 206, 216, 126)
+            column_stretches = (18, 24, 25, 13)
             for col, min_width in enumerate(column_min_widths):
                 self.gridLayout.setColumnMinimumWidth(col, min_width)
             for col, stretch in enumerate(column_stretches):
                 self.gridLayout.setColumnStretch(col, stretch)
+        if hasattr(self, 'groupBox_8'):
+            self.groupBox_8.setMaximumWidth(142)
 
     def apply_klab_main_controls_geometry_tweaks(self):
         """Apply KLAB-only geometry tweaks for fixed-position controls."""
         if not self.use_klab_ui:
             return
+        if getattr(self, '_klab_geometry_update_in_progress', False):
+            return
+        self._klab_geometry_update_in_progress = True
+        try:
+            self._klab_layout_sem_panel()
+            self._klab_layout_stage_panel()
+            self._klab_adjust_selector_with_button(
+                self.groupBox_3,
+                self.comboBox_gridSelector,
+                self.pushButton_gridSettings)
+            self._klab_adjust_selector_with_button(
+                self.groupBox_2,
+                self.comboBox_OVSelector,
+                self.pushButton_OVSettings)
 
-        self._klab_layout_sem_panel()
-        self._klab_layout_stage_panel()
-        self._klab_adjust_selector_with_button(
-            self.groupBox_3,
-            self.comboBox_gridSelector,
-            self.pushButton_gridSettings)
-        self._klab_adjust_selector_with_button(
-            self.groupBox_2,
-            self.comboBox_OVSelector,
-            self.pushButton_OVSettings)
+            # Slightly narrower settings buttons free space for selector text.
+            for btn in (self.pushButton_gridSettings, self.pushButton_OVSettings):
+                btn.setFixedWidth(24)
+                btn.setFixedHeight(22)
+            self._klab_adjust_selector_with_button(
+                self.groupBox_3,
+                self.comboBox_gridSelector,
+                self.pushButton_gridSettings)
+            self._klab_adjust_selector_with_button(
+                self.groupBox_2,
+                self.comboBox_OVSelector,
+                self.pushButton_OVSettings)
+            self._klab_layout_overviews_panel()
+            self._klab_layout_grids_panel()
 
-        # Slightly narrower settings buttons free space for selector text.
-        for btn in (self.pushButton_gridSettings, self.pushButton_OVSettings):
-            btn.setFixedWidth(24)
-            btn.setFixedHeight(22)
-        self._klab_adjust_selector_with_button(
-            self.groupBox_3,
-            self.comboBox_gridSelector,
-            self.pushButton_gridSettings)
-        self._klab_adjust_selector_with_button(
-            self.groupBox_2,
-            self.comboBox_OVSelector,
-            self.pushButton_OVSettings)
-        self._klab_layout_overviews_panel()
-        self._klab_layout_grids_panel()
-
-        # Expand left/right option text lanes in stack acquisition panel.
-        line_x = self.line.x() if hasattr(self, 'line') else 335
-        if hasattr(self, 'groupBox_5') and hasattr(self, 'line'):
-            panel_width = self.groupBox_5.width()
-            base_divider_x = 362  # native is 335; reserve a wider metrics lane
-            divider_x = max(352, min(base_divider_x, panel_width - 310))
-            self.line.move(divider_x, self.line.y())
-            line_x = self.line.x()
-        self._klab_layout_stack_header(line_x)
-        right_col_text_x = min(
-            self.checkBox_mirrorDrive.x(),
-            self.checkBox_monitorTiles.x(),
-            self.checkBox_useAutofocus.x(),
-            self.checkBox_plasmaCleaner.x(),
-            self.checkBox_useTCP.x())
-        inter_col_gap = 16
-        left_btn_preferred_x = (
-            line_x - self.toolButton_monitoringSettings.width() - 8)
-        left_btn_max_from_right_col = (
-            right_col_text_x
-            - self.toolButton_monitoringSettings.width()
-            - inter_col_gap)
-        left_btn_x = min(left_btn_preferred_x, 164, left_btn_max_from_right_col)
-        left_btn_x = max(126, left_btn_x)
-        for btn in (
+            # Expand left/right option text lanes in stack acquisition panel.
+            line_x = self._layout_stack_header_for_current_ui()
+            right_col_text_x = min(
+                self.checkBox_mirrorDrive.x(),
+                self.checkBox_monitorTiles.x(),
+                self.checkBox_useAutofocus.x(),
+                self.checkBox_plasmaCleaner.x(),
+                self.checkBox_useTCP.x())
+            option_toolbuttons = (
                 self.toolButton_monitoringSettings,
                 self.toolButton_OVSettings,
                 self.toolButton_debrisDetection,
-                self.toolButton_askUserMode):
-            btn.move(left_btn_x, btn.y())
-        for cb in (
-                self.checkBox_useMonitoring,
-                self.checkBox_takeOV,
-                self.checkBox_useDebrisDetection,
-                self.checkBox_askUser):
-            cb_width = max(132, left_btn_x - cb.x() - 4)
-            cb.setGeometry(cb.x(), cb.y(), cb_width, cb.height())
+                self.toolButton_askUserMode,
+                self.toolButton_mirrorDrive,
+                self.toolButton_monitorTiles,
+                self.toolButton_autofocus,
+                self.toolButton_plasmaCleaner,
+                self.toolButton_TCPSettings)
+            for btn in option_toolbuttons:
+                btn.setFixedWidth(21)
+            inter_col_gap = 10
+            left_btn_preferred_x = (
+                line_x - self.toolButton_monitoringSettings.width() - 6)
+            left_btn_max_from_right_col = (
+                right_col_text_x
+                - self.toolButton_monitoringSettings.width()
+                - inter_col_gap)
+            left_btn_x = min(left_btn_preferred_x, 172, left_btn_max_from_right_col)
+            left_btn_x = max(136, left_btn_x)
+            option_row_height = self._klab_line_height(self.checkBox_useMonitoring, extra=2)
+            option_btn_height = max(
+                self.toolButton_monitoringSettings.height(),
+                option_row_height - 2)
+            for btn in (
+                    self.toolButton_monitoringSettings,
+                    self.toolButton_OVSettings,
+                    self.toolButton_debrisDetection,
+                    self.toolButton_askUserMode):
+                btn.setFixedHeight(option_btn_height)
+                btn.move(left_btn_x, btn.y())
+            for cb in (
+                    self.checkBox_useMonitoring,
+                    self.checkBox_takeOV,
+                    self.checkBox_useDebrisDetection,
+                    self.checkBox_askUser):
+                cb_width = max(140, left_btn_x - cb.x() - 2)
+                cb.setGeometry(cb.x(), cb.y(), cb_width, option_row_height)
 
-        right_btn_x = min(
-            line_x - self.toolButton_mirrorDrive.width() - 4, 330)
-        for btn in (
+            right_btn_x = min(
+                line_x - self.toolButton_mirrorDrive.width() - 2, 332)
+            for btn in (
                 self.toolButton_mirrorDrive,
                 self.toolButton_monitorTiles,
                 self.toolButton_autofocus,
                 self.toolButton_plasmaCleaner,
                 self.toolButton_TCPSettings):
-            btn.move(right_btn_x, btn.y())
-        right_col_gap = 16
-        for cb in (
-                self.checkBox_mirrorDrive,
-                self.checkBox_monitorTiles,
-                self.checkBox_useAutofocus,
-                self.checkBox_plasmaCleaner,
-                self.checkBox_useTCP):
-            cb_width = max(104, right_btn_x - cb.x() - right_col_gap)
-            cb.setGeometry(cb.x(), cb.y(), cb_width, cb.height())
+                btn.setFixedHeight(option_btn_height)
+                btn.move(right_btn_x, btn.y())
+            right_col_gap = 10
+            for cb in (
+                    self.checkBox_mirrorDrive,
+                    self.checkBox_monitorTiles,
+                    self.checkBox_useAutofocus,
+                    self.checkBox_plasmaCleaner,
+                    self.checkBox_useTCP):
+                cb_width = max(114, right_btn_x - cb.x() - right_col_gap)
+                cb.setGeometry(cb.x(), cb.y(), cb_width, option_row_height)
 
-        if hasattr(self, 'groupBox_5'):
-            self._klab_layout_stack_metrics_panel(line_x)
+            if hasattr(self, 'groupBox_5'):
+                self._klab_layout_stack_metrics_panel(line_x)
 
-        # Center manual commands panel buttons horizontally.
-        panel_width = self.groupBox_8.width()
-        action_button_width = min(max(self.pushButton_doApproach.width(), 108),
-                                  max(96, panel_width - 20))
-        for btn in (
-                self.pushButton_doApproach,
-                self.pushButton_doSweep,
-                self.pushButton_grabFrame,
-                self.pushButton_saveViewport,
-                self.pushButton_EHTToggle):
-            btn.setFixedWidth(action_button_width)
-            btn_x = max(10, int((panel_width - btn.width()) / 2))
-            btn.move(btn_x, btn.y())
+            # Center manual commands panel buttons horizontally.
+            panel_width = self.groupBox_8.width()
+            action_button_width = min(max(self.pushButton_doApproach.width(), 108),
+                                      max(96, panel_width - 20))
+            for btn in (
+                    self.pushButton_doApproach,
+                    self.pushButton_doSweep,
+                    self.pushButton_grabFrame,
+                    self.pushButton_saveViewport,
+                    self.pushButton_EHTToggle):
+                btn.setFixedWidth(action_button_width)
+                btn_x = max(10, int((panel_width - btn.width()) / 2))
+                btn.move(btn_x, btn.y())
 
-        pair_gap = 6
-        pair_width = (self.pushButton_VP.width()
-                      + self.pushButton_FCC.width()
-                      + pair_gap)
-        pair_start_x = max(10, int((panel_width - pair_width) / 2))
-        self.pushButton_VP.move(pair_start_x, self.pushButton_VP.y())
-        self.pushButton_FCC.move(
-            pair_start_x + self.pushButton_VP.width() + pair_gap,
-            self.pushButton_FCC.y())
-        self._klab_refresh_main_controls_label_texts()
+            pair_gap = 6
+            pair_width = (self.pushButton_VP.width()
+                          + self.pushButton_FCC.width()
+                          + pair_gap)
+            pair_start_x = max(10, int((panel_width - pair_width) / 2))
+            self.pushButton_VP.move(pair_start_x, self.pushButton_VP.y())
+            self.pushButton_FCC.move(
+                pair_start_x + self.pushButton_VP.width() + pair_gap,
+                self.pushButton_FCC.y())
+            self._klab_refresh_main_controls_label_texts()
+        finally:
+            self._klab_geometry_update_in_progress = False
 
     def _klab_adjust_selector_with_button(self, group_box, combo_box, button):
         """Resize selector combo and keep settings button docked right."""
@@ -997,6 +1022,30 @@ class MainControls(QMainWindow):
             text = widget.text()
         return widget.fontMetrics().horizontalAdvance(str(text).replace('&', ''))
 
+    def _klab_line_height(self, widget, extra=4):
+        return max(16, widget.fontMetrics().lineSpacing() + extra)
+
+    def _klab_wrapped_height(self, widget, width, min_lines=1, extra=4):
+        text = widget.property('_klab_full_text')
+        if text is None:
+            text = widget.text()
+        text = str(text).replace('&', '')
+        width = max(24, int(width))
+        rect = widget.fontMetrics().boundingRect(
+            QRect(0, 0, width, 1000),
+            Qt.TextWordWrap,
+            text)
+        min_height = max(1, min_lines) * widget.fontMetrics().lineSpacing()
+        return max(min_height, rect.height()) + extra
+
+    def _klab_set_wrapped_geometry(
+            self, widget, x, y, width, min_lines=1, extra=4):
+        widget.setWordWrap(True)
+        height = self._klab_wrapped_height(
+            widget, width, min_lines=min_lines, extra=extra)
+        widget.setGeometry(x, y, width, height)
+        return height
+
     def _klab_dock_widget_before_button(
             self, group_box, widget, button, gap=4, right_margin=4):
         button_x = group_box.width() - right_margin - button.width()
@@ -1006,9 +1055,10 @@ class MainControls(QMainWindow):
 
     def _klab_layout_pair_columns(
             self, group_box, label_value_pairs, left_margin=10,
-            right_margin=10, gap=8, max_label_ratio=0.54):
+            right_margin=10, gap=8, max_label_ratio=0.54,
+            top_y=None, row_gap=4):
         if not label_value_pairs:
-            return
+            return top_y or 0
         available_width = max(100, group_box.width() - left_margin - right_margin)
         widest_label = max(self._klab_text_width(label)
                            for label, _ in label_value_pairs)
@@ -1016,56 +1066,110 @@ class MainControls(QMainWindow):
         label_width = min(label_width, int(available_width * max_label_ratio))
         value_x = left_margin + label_width + gap
         value_width = max(52, group_box.width() - right_margin - value_x)
+        current_y = label_value_pairs[0][0].y() if top_y is None else top_y
+        row_height = max(
+            self._klab_line_height(label, extra=2)
+            for label, _ in label_value_pairs)
         for label, value in label_value_pairs:
-            label.setGeometry(left_margin, label.y(), label_width, label.height())
-            value.setGeometry(value_x, value.y(), value_width, value.height())
+            label.setGeometry(left_margin, current_y, label_width, row_height)
+            value.setGeometry(value_x, current_y, value_width, row_height)
+            current_y += row_height + row_gap
+        return current_y
 
-    def _klab_expand_full_row(self, group_box, widgets, left_margin=10, right_margin=10):
+    def _klab_expand_full_row(
+            self, group_box, widgets, left_margin=10, right_margin=10,
+            top_y=None, row_gap=4):
         row_width = max(40, group_box.width() - left_margin - right_margin)
+        current_y = widgets[0].y() if widgets and top_y is None else (top_y or 0)
         for widget in widgets:
-            widget.setGeometry(left_margin, widget.y(), row_width, widget.height())
+            row_height = self._klab_line_height(widget, extra=2)
+            widget.setGeometry(left_margin, current_y, row_width, row_height)
+            current_y += row_height + row_gap
+        return current_y
 
     def _klab_layout_sem_panel(self):
         self._klab_dock_widget_before_button(
             self.groupBox_SEM, self.label_SEM, self.pushButton_SEMSettings)
+        panel_width = self.groupBox_SEM.width()
+        label_width = self.pushButton_SEMSettings.x() - 14
+        title_y = 25
+        device_height = self._klab_set_wrapped_geometry(
+            self.label_SEM, 10, title_y, label_width, min_lines=1, extra=2)
+        row_y = title_y + device_height + 6
+        row_height = self._klab_line_height(self.label_le, extra=2)
         beam_label_width = max(36, self._klab_text_width(self.label_le) + 4)
-        beam_value_x = self.label_le.x() + beam_label_width + 6
-        beam_value_width = max(52, self.groupBox_SEM.width() - 10 - beam_value_x)
+        beam_value_x = 10 + beam_label_width + 6
+        beam_value_width = max(52, panel_width - 10 - beam_value_x)
         self.label_le.setGeometry(
-            self.label_le.x(), self.label_le.y(),
-            beam_label_width, self.label_le.height())
+            10, row_y,
+            beam_label_width, row_height)
         self.label_beamSettings.setGeometry(
-            beam_value_x, self.label_beamSettings.y(),
-            beam_value_width, self.label_beamSettings.height())
+            beam_value_x, row_y,
+            beam_value_width, row_height)
 
     def _klab_layout_stage_panel(self):
         self._klab_dock_widget_before_button(
             self.groupBox_stage, self.label_microtome,
             self.pushButton_microtomeSettings)
-        self._klab_expand_full_row(
-            self.groupBox_stage,
-            (self.label_lcsp, self.label_currentStageXY, self.label_currentStageZ))
+        label_width = self.pushButton_microtomeSettings.x() - 14
+        title_y = 24
+        device_height = self._klab_set_wrapped_geometry(
+            self.label_microtome, 10, title_y, label_width, min_lines=1, extra=0)
+        next_y = title_y + device_height + 4
+        lcsp_height = self._klab_set_wrapped_geometry(
+            self.label_lcsp, 10, next_y, self.groupBox_stage.width() - 20,
+            min_lines=1, extra=0)
+        next_y += lcsp_height + 1
+        xy_height = self._klab_set_wrapped_geometry(
+            self.label_currentStageXY, 10, next_y, self.groupBox_stage.width() - 20,
+            min_lines=2, extra=0)
+        next_y += xy_height + 1
+        self.label_currentStageZ.setWordWrap(False)
+        z_height = self._klab_line_height(self.label_currentStageZ, extra=0)
+        self.label_currentStageZ.setGeometry(
+            10, next_y, self.groupBox_stage.width() - 20, z_height)
+        self._ensure_klab_stage_panel_height(next_y + z_height + 8)
+
+    def _ensure_klab_stage_panel_height(self, required_bottom):
+        if (not self.use_klab_ui
+                or not hasattr(self, 'groupBox_stage')
+                or required_bottom <= self.groupBox_stage.height()):
+            return
+        delta = required_bottom - self.groupBox_stage.height()
+        self.groupBox_stage.setMinimumHeight(
+            self.groupBox_stage.minimumHeight() + delta)
+        self.resize(self.width(), self.height() + delta)
+        if hasattr(self, 'tabWidget') and self.tabWidget.minimumHeight() > 0:
+            self.tabWidget.setMinimumHeight(
+                self.tabWidget.minimumHeight() + delta)
 
     def _klab_layout_overviews_panel(self):
-        self._klab_layout_pair_columns(
+        next_y = self._klab_layout_pair_columns(
             self.groupBox_2,
             (
                 (self.label_fs_2, self.label_OVSize),
                 (self.label_ps_2, self.label_OVMagnification),
                 (self.label_dt_2, self.label_OVDwellTime),
             ),
-            max_label_ratio=0.50)
-        self._klab_expand_full_row(
-            self.groupBox_2,
-            (
-                self.label_10,
-                self.label_debrisDetectionArea,
-                self.label_o_2,
-                self.label_OVLocation,
-            ))
+            max_label_ratio=0.50,
+            top_y=55,
+            row_gap=4)
+        full_row_width = max(40, self.groupBox_2.width() - 20)
+        row_height = self._klab_line_height(self.label_10, extra=2)
+        self.label_10.setGeometry(10, next_y + 2, full_row_width, row_height)
+        next_y += row_height + 2
+        wrapped_height = self._klab_set_wrapped_geometry(
+            self.label_debrisDetectionArea, 10, next_y, full_row_width,
+            min_lines=1, extra=2)
+        next_y += wrapped_height + 4
+        self.label_o_2.setGeometry(10, next_y, full_row_width, row_height)
+        next_y += row_height + 2
+        self._klab_set_wrapped_geometry(
+            self.label_OVLocation, 10, next_y, full_row_width,
+            min_lines=1, extra=2)
 
     def _klab_layout_grids_panel(self):
-        self._klab_layout_pair_columns(
+        next_y = self._klab_layout_pair_columns(
             self.groupBox_3,
             (
                 (self.label_g, self.label_gridSize),
@@ -1074,12 +1178,30 @@ class MainControls(QMainWindow):
                 (self.label_ps, self.label_tilePixelSize),
                 (self.label_dt, self.label_tileDwellTime),
             ),
-            max_label_ratio=0.46)
-        self._klab_expand_full_row(
-            self.groupBox_3,
-            (self.label_o, self.label_gridOrigin))
+            max_label_ratio=0.46,
+            top_y=55,
+            row_gap=4)
+        full_row_width = max(40, self.groupBox_3.width() - 20)
+        row_height = self._klab_line_height(self.label_o, extra=2)
+        self.label_o.setGeometry(10, next_y + 2, full_row_width, row_height)
+        self._klab_set_wrapped_geometry(
+            self.label_gridOrigin, 10, next_y + row_height + 4, full_row_width,
+            min_lines=1, extra=2)
+
+    def _layout_stack_header_for_current_ui(self):
+        if not hasattr(self, 'line'):
+            return 335
+        divider_x = self.line.x()
+        if self.use_klab_ui and hasattr(self, 'groupBox_5'):
+            panel_width = self.groupBox_5.width()
+            base_divider_x = 366
+            divider_x = max(352, min(base_divider_x, panel_width - 348))
+            self.line.move(divider_x, self.line.y())
+        self._klab_layout_stack_header(divider_x)
+        return divider_x
 
     def _klab_layout_stack_header(self, divider_x):
+        row_height = self._klab_line_height(self.label_t, extra=2)
         right_btn_x = divider_x - self.pushButton_acqSettings.width() - 8
         self.pushButton_acqSettings.move(right_btn_x, self.pushButton_acqSettings.y())
         line_edit_width = max(180, right_btn_x - self.lineEdit_baseDir.x() - 8)
@@ -1089,71 +1211,191 @@ class MainControls(QMainWindow):
 
         left_section_right = divider_x - 12
         section_gap = 14
-        target_label_width = max(96, int((left_section_right - 10) * 0.34))
-        target_value_width = 74
-        target_value_x = self.label_t.x() + target_label_width + 6
+        summary_width = max(136, left_section_right - 10)
+        target_label_width = max(102, min(144, int(summary_width * 0.42)))
+        target_value_width = max(42, min(72, int(summary_width * 0.17)))
+        target_value_x = 10 + target_label_width + 6
         slice_label_x = target_value_x + target_value_width + section_gap
-        slice_label_width = max(72, left_section_right - slice_label_x - 58)
-        slice_value_width = max(48, left_section_right - slice_label_x)
+        slice_label_width = max(78, left_section_right - slice_label_x - 10)
+        slice_value_width = max(58, left_section_right - slice_label_x)
 
         self.label_t.setGeometry(
-            self.label_t.x(), self.label_t.y(),
-            target_label_width, self.label_t.height())
+            10, self.label_t.y(),
+            target_label_width, row_height)
         self.label_target.setGeometry(
-            target_value_x, self.label_t.y() + 18,
-            target_value_width, self.label_target.height())
+            target_value_x, self.label_target.y(),
+            target_value_width, row_height)
         self.label_st.setGeometry(
             slice_label_x, self.label_st.y(),
-            slice_label_width, self.label_st.height())
+            slice_label_width, row_height)
         self.label_sliceThickness.setGeometry(
-            slice_label_x, self.label_st.y() + 18,
-            slice_value_width, self.label_sliceThickness.height())
+            slice_label_x, self.label_sliceThickness.y(),
+            slice_value_width, row_height)
+        if hasattr(self, 'pushButton_acquisitionManagerMain'):
+            button_y = max(
+                self.label_target.y() + self.label_target.height(),
+                self.label_sliceThickness.y() + self.label_sliceThickness.height()) + 6
+            button_width = min(
+                max(136, left_section_right - 10),
+                max(140, right_btn_x - self.lineEdit_baseDir.x() - 20))
+            self.pushButton_acquisitionManagerMain.setGeometry(
+                10, button_y, button_width, max(23, row_height + 2))
 
     def _klab_layout_stack_metrics_panel(self, divider_x):
         panel_width = self.groupBox_5.width()
-        section_x = divider_x + 24
-        right_margin = 12
-        section_width = max(220, panel_width - right_margin - section_x)
+        section_x = divider_x + 14
+        right_margin = 8
+        section_width = max(240, panel_width - right_margin - section_x)
+        line_height = self._klab_line_height(self.label, extra=2)
+        current_y = 28
 
-        self.label_dose_3.setGeometry(
-            section_x, 30, section_width, self.label_dose_3.height())
-        self.label_dose.setGeometry(
-            section_x, 47, section_width, self.label_dose.height())
+        for label in (
+                self.label_dose_3,
+                self.label_dose,
+                self.label,
+                self.label_totalDuration,
+                self.label_2,
+                self.label_dateEstimate):
+            label.setWordWrap(True)
 
-        column_gap = 12
-        metric_top_y = 68
-        metric_value_y = 86
-        metric_col_width = max(72, int((section_width - 2 * column_gap) / 3))
-        metric_x_positions = (
-            section_x,
-            section_x + metric_col_width + column_gap,
-            section_x + 2 * (metric_col_width + column_gap),
-        )
+        dose_title_height = self._klab_set_wrapped_geometry(
+            self.label_dose_3, section_x, current_y, section_width,
+            min_lines=1, extra=2)
+        current_y += dose_title_height + 2
+        dose_value_height = self._klab_set_wrapped_geometry(
+            self.label_dose, section_x, current_y, section_width,
+            min_lines=1, extra=2)
+        current_y += dose_value_height + 8
+
+        column_gap = 10
+        metric_top_y = current_y
+        metric_value_y = metric_top_y + line_height + 1
         metric_pairs = (
             (self.label_dimensions_2, self.label_totalArea),
             (self.label_dimensions_3, self.label_totalZ),
             (self.label_6, self.label_totalData),
         )
-        for (title_label, value_label), x in zip(metric_pairs, metric_x_positions):
-            title_label.setGeometry(x, metric_top_y, metric_col_width, title_label.height())
-            value_label.setGeometry(x, metric_value_y, metric_col_width, value_label.height())
+        metric_base_widths = [
+            max(self._klab_text_width(title_label), self._klab_text_width(value_label)) + 12
+            for title_label, value_label in metric_pairs
+        ]
+        available_metric_width = max(
+            150,
+            section_width - column_gap * (len(metric_pairs) - 1))
+        total_metric_base = sum(metric_base_widths) or 1
+        metric_widths = [
+            max(70, int(available_metric_width * base_width / total_metric_base))
+            for base_width in metric_base_widths
+        ]
+        metric_widths[0] += available_metric_width - sum(metric_widths)
 
-        self.label.setGeometry(section_x, 108, section_width, self.label.height())
-        self.label_totalDuration.setGeometry(
-            section_x, 126, section_width, self.label_totalDuration.height())
-        self.label_2.setGeometry(section_x, 152, section_width, self.label_2.height())
-        self.label_dateEstimate.setGeometry(
-            section_x, 170, section_width, self.label_dateEstimate.height())
-        self.label_cp.setGeometry(section_x, 225, 112, self.label_cp.height())
+        current_x = section_x
+        for (title_label, value_label), metric_width in zip(metric_pairs, metric_widths):
+            title_label.setGeometry(current_x, metric_top_y, metric_width, line_height)
+            value_label.setGeometry(current_x, metric_value_y, metric_width, line_height)
+            current_x += metric_width + column_gap
+
+        current_y = metric_value_y + line_height + 8
+        duration_title_height = self._klab_set_wrapped_geometry(
+            self.label, section_x, current_y, section_width,
+            min_lines=1, extra=2)
+        current_y += duration_title_height + 2
+        duration_value_height = self._klab_set_wrapped_geometry(
+            self.label_totalDuration, section_x, current_y, section_width,
+            min_lines=1, extra=2)
+        current_y += duration_value_height + 8
+        date_title_height = self._klab_set_wrapped_geometry(
+            self.label_2, section_x, current_y, section_width,
+            min_lines=1, extra=2)
+        current_y += date_title_height + 2
+        date_value_height = self._klab_set_wrapped_geometry(
+            self.label_dateEstimate, section_x, current_y, section_width,
+            min_lines=1, extra=2)
+        current_y += date_value_height + 8
+        cp_label_width = max(86, self._klab_text_width(self.label_cp) + 8)
+        current_position_x = section_x + cp_label_width + 6
+        self.label_cp.setGeometry(
+            section_x, current_y, cp_label_width, line_height)
         self.label_currentPosition.setGeometry(
-            section_x + 96, 225,
-            max(110, section_width - 96), self.label_currentPosition.height())
+            current_position_x, current_y,
+            max(110, section_width - (current_position_x - section_x)),
+            line_height)
+        current_y += line_height + 8
         self.progressBar.setGeometry(
-            section_x, self.progressBar.y(),
+            section_x, current_y,
             section_width, self.progressBar.height())
+        self._ensure_klab_stack_panel_height(
+            current_y + self.progressBar.height() + 8)
+
+    def _ensure_klab_stack_panel_height(self, required_bottom):
+        if (not self.use_klab_ui
+                or not hasattr(self, 'groupBox_5')
+                or required_bottom <= self.groupBox_5.height()):
+            return
+        delta = required_bottom - self.groupBox_5.height()
+        self.groupBox_5.setMinimumHeight(
+            self.groupBox_5.minimumHeight() + delta)
+        self.resize(self.width(), self.height() + delta)
+        if hasattr(self, 'tabWidget') and self.tabWidget.minimumHeight() > 0:
+            self.tabWidget.setMinimumHeight(
+                self.tabWidget.minimumHeight() + delta)
+        if hasattr(self, 'line'):
+            self.line.setGeometry(
+                self.line.x(),
+                self.line.y(),
+                self.line.width(),
+                self.line.height() + delta)
+
+    def _ensure_acquisition_manager_button(self):
+        if hasattr(self, 'pushButton_acquisitionManagerMain'):
+            return
+        self.pushButton_acquisitionManagerMain = QPushButton(
+            'Acquisition manager', self.groupBox_5)
+        self.pushButton_acquisitionManagerMain.setObjectName(
+            'pushButton_acquisitionManagerMain')
+        self.pushButton_acquisitionManagerMain.setToolTip(
+            'Open the acquisition manager for grouped overview and grid control.')
+        self.pushButton_acquisitionManagerMain.setEnabled(False)
+
+    def _ensure_stack_acquisition_row_space(self):
+        if getattr(self, '_stack_acq_extra_row_applied', False):
+            return
+        self._stack_acq_extra_row_applied = True
+        shift_delta = 28
+        self._stack_acq_extra_row_delta = shift_delta
+        if hasattr(self, 'groupBox_5'):
+            self.groupBox_5.setMinimumHeight(
+                self.groupBox_5.minimumHeight() + shift_delta)
+        self.resize(self.width(), self.height() + shift_delta)
+        if hasattr(self, 'tabWidget') and self.tabWidget.minimumHeight() > 0:
+            self.tabWidget.setMinimumHeight(
+                self.tabWidget.minimumHeight() + shift_delta)
+        if hasattr(self, 'line'):
+            self.line.setGeometry(
+                self.line.x(),
+                self.line.y(),
+                self.line.width(),
+                self.line.height() + shift_delta)
+        if not hasattr(self, 'groupBox_5'):
+            return
+        for widget in self.groupBox_5.findChildren(QWidget):
+            if widget in (
+                    self.lineEdit_baseDir,
+                    self.pushButton_acqSettings,
+                    self.pushButton_acquisitionManagerMain,
+                    self.line,
+                    self.label_t,
+                    self.label_target,
+                    self.label_st,
+                    self.label_sliceThickness):
+                continue
+            if widget.y() >= 95:
+                widget.move(widget.x(), widget.y() + shift_delta)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, 'pushButton_acquisitionManagerMain'):
+            self._layout_stack_header_for_current_ui()
         if self.use_klab_ui and hasattr(self, 'groupBox_8'):
             self.apply_klab_main_controls_geometry_tweaks()
 
@@ -1300,6 +1542,8 @@ class MainControls(QMainWindow):
                 str(self.acq.slice_thickness) + ' nm')
         else:
             self._klab_set_label_text(self.label_sliceThickness, '---')
+        if self.use_klab_ui:
+            self.apply_klab_main_controls_geometry_tweaks()
 
     def show_stack_acq_estimates(self):
         """Read current estimates from the stack instance and display
@@ -1334,6 +1578,8 @@ class MainControls(QMainWindow):
         days, hours, minutes = utils.get_days_hours_minutes(remaining_time)
         self._klab_set_label_text(self.label_dateEstimate,
             date_estimate + f'   ({days} d {hours} h {minutes} min remaining)')
+        if self.use_klab_ui:
+            self.apply_klab_main_controls_geometry_tweaks()
 
     def update_acq_options(self):
         """Update the options for the stack acquisition selected by the user
@@ -2321,6 +2567,10 @@ class MainControls(QMainWindow):
         self.viewport._refresh_acquisition_manager()
         self.viewport.vp_draw()
 
+    def open_acquisition_manager_from_main_controls(self):
+        if hasattr(self, 'viewport') and self.viewport is not None:
+            self.viewport.vp_open_acquisition_manager()
+
     def open_acq_settings_dlg(self):
         prev_stack_name = self.acq.stack_name
         dialog = AcqSettingsDlg(self.acq, self.notifications,
@@ -2478,10 +2728,18 @@ class MainControls(QMainWindow):
     def show_current_stage_xy(self):
         xy_pos = self.stage.last_known_xy
         if xy_pos[0] is None or xy_pos[1] is None:
-            pos_info = ('X: unknown    Y: unknown')
+            if self.use_klab_ui:
+                pos_info = 'X: unknown\nY: unknown'
+            else:
+                pos_info = 'X: unknown    Y: unknown'
         else:
-            pos_info = ('X: {0:.3f}    Y: {1:.3f}'.format(*xy_pos))
+            if self.use_klab_ui:
+                pos_info = 'X: {0:.3f}\nY: {1:.3f}'.format(*xy_pos)
+            else:
+                pos_info = 'X: {0:.3f}    Y: {1:.3f}'.format(*xy_pos)
         self._klab_set_label_text(self.label_currentStageXY, pos_info)
+        if self.use_klab_ui:
+            self._klab_layout_stage_panel()
         QApplication.processEvents() # ensures changes are shown without delay
 
     def show_current_stage_z(self):
@@ -2491,6 +2749,8 @@ class MainControls(QMainWindow):
         else:
             pos_info = 'Z: {0:.3f}'.format(z_pos)
         self._klab_set_label_text(self.label_currentStageZ, pos_info)
+        if self.use_klab_ui:
+            self._klab_layout_stage_panel()
         QApplication.processEvents()
 
     def set_statusbar(self, msg):
@@ -2752,6 +3012,8 @@ class MainControls(QMainWindow):
         self.pushButton_OVSettings.setEnabled(idle)
         self.pushButton_gridSettings.setEnabled(idle)
         self.pushButton_acqSettings.setEnabled(idle)
+        if hasattr(self, 'pushButton_acquisitionManagerMain'):
+            self.pushButton_acquisitionManagerMain.setEnabled(idle)
         # Other buttons
         self.pushButton_doApproach.setEnabled(idle)
         self.pushButton_doSweep.setEnabled(idle)
