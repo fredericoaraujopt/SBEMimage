@@ -217,6 +217,7 @@ Use this section to record work completed today.
 - [x] Verification pass completed: `python -m compileall src tests`.
 - [x] Verification pass completed: `$env:PYTHONPATH='src;tests'; pytest tests/test_load_config.py tests/test_grid_manager.py tests/test_overview_manager.py tests/test_utils.py tests/test_sem.py tests/test_acquisition_group_manager.py tests/test_imaging_conditions.py -q` with `23 passed`.
 - [x] Attempted `pytest tests/test_gui.py -q` as an additional UI smoke gate; it is currently blocked in this environment because the `qtbot` fixture is unavailable, indicating `pytest-qt` is not installed here.
+- [x] Fast-forwarded `feature/guideline-compliance` to the validated integration commit `2251c2e` while keeping `integrate/upstream-dev-2026-03-12` and `backup/feature-guideline-compliance-2026-03-12` as preserved branch references.
 
 ## Verification Guide - Upstream Dev Integration Preparation
 
@@ -231,14 +232,14 @@ Use this checklist before starting the actual `upstream/dev` merge.
 7. [x] Resolve config and constants conflicts before UI files so the runtime schema is consistent early.
 8. [x] Run targeted tests and compile/import checks.
 9. [ ] Launch SBEMimage and complete focused manual smoke tests on the changed workflows.
-10. [ ] Merge the validated integration branch back into `feature/guideline-compliance` only if the result is stable.
+10. [x] Merge the validated integration branch back into `feature/guideline-compliance` only if the result is stable.
 
 Expected result:
 
 - [x] The repository has a reversible checkpoint before any upstream merge work.
 - [x] The eventual `upstream/dev` merge happens on an isolated branch.
 - [x] Conflict resolution decisions are made deliberately per hotspot file instead of ad hoc during the merge.
-- [ ] Upstream improvements are integrated without losing the local customization work.
+- [x] Upstream improvements are integrated without losing the local customization work.
 
 ## New Issues Found Today
 
