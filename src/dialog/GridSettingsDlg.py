@@ -2,11 +2,15 @@ import numpy as np
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QPixmap, QColor, QIcon
-from qtpy.QtWidgets import QDialog, QMessageBox
+from qtpy.QtWidgets import QComboBox, QDialog, QLabel, QMessageBox, QPushButton
 from qtpy.uic import loadUi
 
 import constants
 import utils
+from dialog.ImagingConditionSupport import (
+    GridImagingConditionAdapter,
+    ImagingConditionController,
+)
 from dialog.FocusGradientSettingsDlg import FocusGradientSettingsDlg
 
 
@@ -14,18 +18,18 @@ class GridSettingsDlg(QDialog):
     """Dialog for changing grid settings and for adding/deleting grids."""
 
     def __init__(self, grid_manager, sem, selected_grid, main_controls_trigger,
-                 magc_mode=False):
+                 imaging_condition_store, magc_mode=False, acq_groups=None):
         super().__init__()
         self.gm = grid_manager
         self.sem = sem
         self.current_grid = selected_grid
         self.main_controls_trigger = main_controls_trigger
+        self.imaging_condition_store = imaging_condition_store
         self.magc_mode = magc_mode
+        self.acq_groups = acq_groups
         loadUi('gui/grid_settings_dlg.ui', self)
         self.setWindowModality(Qt.ApplicationModal)
         self.setWindowIcon(utils.get_window_icon())
-        self.setFixedSize(self.size())
-        self.show()
         # Set up grid selector:
         self.comboBox_gridSelector.addItems(self.gm.grid_selector_list())
         self.comboBox_gridSelector.setCurrentIndex(self.current_grid)
@@ -60,11 +64,6 @@ class GridSettingsDlg(QDialog):
         if sem.device_name.startswith("TESCAN"):
             self.checkBox_focusGradient.setEnabled(False)
             self.toolButton_focusGradient.setEnabled(False)
-        # Button to load current SEM imaging parameters.
-        # For now, only enabled for ZEISS SEMs.
-        self.pushButton_getFromSEM.clicked.connect(self.get_settings_from_sem)
-        self.pushButton_getFromSEM.setEnabled(
-            self.sem.device_name.startswith("ZEISS"))
         # Buttons to reset tile previews and wd/stig parameters
         self.pushButton_resetTilePreviews.clicked.connect(
             self.reset_tile_previews)
@@ -78,6 +77,7 @@ class GridSettingsDlg(QDialog):
         self.show_current_settings()
         self.show_frame_size_and_dose()
         self.update_polygon_mode()
+        self._setup_imaging_condition_controls()
         if 'multisem' in self.sem.device_name.lower():
             # in multisem ROIs are used instead of grids
             # the smallest possible grid is kept for compatibility
@@ -88,6 +88,71 @@ class GridSettingsDlg(QDialog):
             self.comboBox_tileSize.setEnabled(False)
             self.comboBox_tileSize.setCurrentIndex(0)
             self.spinBox_shift.setEnabled(False)
+        self.setFixedSize(self.size())
+        self.show()
+
+    def _shift_widgets_y(self, widgets, delta):
+        for widget in widgets:
+            widget.move(widget.x(), widget.y() + delta)
+
+    def _setup_imaging_condition_controls(self):
+        preset_delta = 54
+        save_as_delta = 30
+        self._shift_widgets_y(
+            [
+                self.groupBox_2,
+                self.radioButton_active,
+                self.radioButton_inactive,
+                self.pushButton_save,
+                self.pushButton_addGrid,
+                self.pushButton_deleteGrid,
+                self.buttonBox,
+            ],
+            preset_delta)
+        self._shift_widgets_y(
+            [
+                self.pushButton_addGrid,
+                self.pushButton_deleteGrid,
+                self.buttonBox,
+            ],
+            save_as_delta)
+        self.resize(self.width(), self.height() + preset_delta + save_as_delta)
+
+        combo_width = self.pushButton_getFromSEM.width()
+        left_x = self.pushButton_getFromSEM.x()
+        block_y = self.pushButton_getFromSEM.y() + self.pushButton_getFromSEM.height() + 8
+        self.label_savedImagingCondition = QLabel(
+            'Saved imaging condition:', self)
+        self.label_savedImagingCondition.setGeometry(left_x, block_y, combo_width, 18)
+        self.comboBox_savedImagingCondition = QComboBox(self)
+        self.comboBox_savedImagingCondition.setGeometry(
+            left_x, block_y + 20, combo_width, 22)
+        self.pushButton_applySavedImagingCondition = QPushButton(
+            'Apply saved settings', self)
+        self.pushButton_applySavedImagingCondition.setGeometry(
+            left_x, block_y + 50, 136, 23)
+        self.pushButton_manageImagingConditions = QPushButton(
+            'Manage...', self)
+        self.pushButton_manageImagingConditions.setGeometry(
+            left_x + 144, block_y + 50, 77, 23)
+        self.pushButton_saveCurrentImagingConditionAs = QPushButton(
+            'Save current settings as...', self)
+        self.pushButton_saveCurrentImagingConditionAs.setGeometry(
+            self.pushButton_save.x(),
+            self.pushButton_save.y() + 30,
+            self.pushButton_save.width(),
+            23)
+
+        adapter = GridImagingConditionAdapter(self, self.sem)
+        self.imaging_condition_controller = ImagingConditionController(
+            self,
+            self.imaging_condition_store,
+            adapter,
+            self.comboBox_savedImagingCondition,
+            self.pushButton_applySavedImagingCondition,
+            self.pushButton_manageImagingConditions,
+            self.pushButton_saveCurrentImagingConditionAs,
+            self.pushButton_getFromSEM)
 
     def update_active_status(self):
         # If current grid is inactive, disable GUI elements
@@ -135,6 +200,7 @@ class GridSettingsDlg(QDialog):
         grid = self.gm[self.current_grid]
         self.comboBox_colourSelector.setCurrentIndex(
             grid.display_colour)
+        self._update_colour_selector_state()
         self.checkBox_focusGradient.setChecked(
             grid.use_wd_gradient)
         if grid.is_deferred_polygon_roi():
@@ -243,6 +309,22 @@ class GridSettingsDlg(QDialog):
         self.show_current_settings()
         self.show_frame_size_and_dose()
         self.update_polygon_mode()
+
+    def _update_colour_selector_state(self):
+        grouped = (
+            self.acq_groups is not None
+            and self.acq_groups.grid_group_id(self.current_grid) is not None)
+        self.comboBox_colourSelector.setEnabled(not grouped)
+        if grouped:
+            group_path = self.acq_groups.grid_group_path_text(self.current_grid)
+            self.label_6.setText('Grid colour: group-managed')
+            self.comboBox_colourSelector.setToolTip(
+                f'This grid is grouped under "{group_path}". '
+                'The viewport colour comes from the acquisition manager.')
+        else:
+            self.label_6.setText('Grid colour:')
+            self.comboBox_colourSelector.setToolTip(
+                'Choose the viewport colour for this ungrouped grid.')
 
     def update_buttons(self):
         """Update labels on buttons and disable/enable delete button
@@ -422,8 +504,10 @@ class GridSettingsDlg(QDialog):
         grid.frame_size_selector = frame_size_selector
         grid.overlap = input_overlap
         grid.row_shift = input_shift
-        grid.display_colour = (
-            self.comboBox_colourSelector.currentIndex())
+        if (self.acq_groups is None
+                or self.acq_groups.grid_group_id(self.current_grid) is None):
+            grid.display_colour = (
+                self.comboBox_colourSelector.currentIndex())
         grid.use_wd_gradient = (
             self.checkBox_focusGradient.isChecked())
         if self.checkBox_focusGradient.isChecked():

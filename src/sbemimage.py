@@ -279,10 +279,9 @@ def main():
                 try:
                     with open(theme_path, 'r', encoding='utf-8') as f:
                         SBEMimage.setStyleSheet(f.read())
-                    font_pt = int(config['sys'].get(
-                        'klab_font_pt',
-                        config['sys'].get('teal_experiment_font_pt', '8')))
-                    font_pt = min(max(font_pt, 7), 11)
+                    # Keep KLAB on a fixed readable baseline and solve fit
+                    # issues through KLAB-only geometry/padding changes.
+                    font_pt = 11
                     ui_font = QFont('Segoe UI')
                     ui_font.setPointSize(font_pt)
                     SBEMimage.setFont(ui_font)

@@ -482,10 +482,14 @@ class GridManager(list):
         # Cycle through available colours.
         display_colour = (self[new_grid_index - 1].display_colour + 1) % 10
 
+        initial_active_tiles = []
+        if active:
+            initial_active_tiles = list(range(size[0] * size[1]))
+
         new_grid = Grid(self.cs, self.sem,
                         active=active, origin_sx_sy=[x_pos, y_pos], sw_sh=sw_sh,
                         rotation=rotation, size=size, overlap=overlap, row_shift=row_shift,
-                        active_tiles=[], frame_size=frame_size,
+                        active_tiles=initial_active_tiles, frame_size=frame_size,
                         frame_size_selector=frame_size_selector, pixel_size=pixel_size,
                         dwell_time=dwell_time, dwell_time_selector=dwell_time_selector,
                         bit_depth_selector=bit_depth_selector,

@@ -62,10 +62,20 @@ class TestGuiMock:
         sem = self.main_controls.sem
         stage = self.main_controls.stage
         ovm = self.main_controls.ovm
+        imported_images = self.main_controls.imported
         acq = self.main_controls.acq
         img_inspector = self.main_controls.img_inspector
         viewport_trigger = self.main_controls.viewport.viewport_trigger
-        dialog = StubOVDlg((0, 0), sem, stage, ovm, acq, img_inspector, viewport_trigger)
+        dialog = StubOVDlg(
+            (0, 0),
+            sem,
+            stage,
+            ovm,
+            imported_images,
+            acq,
+            img_inspector,
+            viewport_trigger,
+            self.main_controls.imaging_condition_store)
         dialog.pushButton_acquire.click()
 
         while True:

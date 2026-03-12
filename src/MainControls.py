@@ -57,6 +57,8 @@ from Viewport import Viewport
 from ImageInspector import ImageInspector
 from Autofocus import Autofocus
 from TCPRemote import TCPRemote
+from AcquisitionGroupManager import AcquisitionGroupManager
+from ImagingConditions import ImagingConditionStore
 from dialog.AboutBox import AboutBox
 from dialog.SendCommandDlg import SendCommandDlg
 from dialog.MotorTestDlg import MotorTestDlg
@@ -122,6 +124,7 @@ class MainControls(QMainWindow):
             self.cfg['sys']['use_microtome'].lower() == 'true')
         self.statusbar_msg = ''
         self.acq_notes_saved = True
+        self.imaging_condition_store = ImagingConditionStore()
 
         # If workspace folder does not exist, create it.
         workspace_dir = os.path.join(self.cfg['acq']['base_dir'], 'workspace')
@@ -225,6 +228,7 @@ class MainControls(QMainWindow):
         # Set up the objects to manage overviews, grids
         self.ovm = OverviewManager(self.cfg, self.sem, self.cs)
         self.gm = GridManager(self.cfg, self.sem, self.cs)
+        self.acq_groups = AcquisitionGroupManager(self.cfg, self.gm, self.ovm)
         self.tm = TemplateManager(self.ovm)
 
         utils.show_progress_in_console(30)
@@ -396,6 +400,8 @@ class MainControls(QMainWindow):
                                  self.ovm, self.gm, self.imported,
                                  self.autofocus, self.acq, self.img_inspector,
                                  self.trigger, self.tm,
+                                 self.imaging_condition_store,
+                                 self.acq_groups,
                                  use_klab_ui=self.use_klab_ui)
         self.viewport.show()
 
@@ -502,6 +508,7 @@ class MainControls(QMainWindow):
         """Load and set up the Main Controls GUI"""
         loadUi('gui/main_window.ui', self)
         if self.use_klab_ui:
+            self._klab_capture_main_controls_label_texts()
             self.apply_klab_main_controls_width_tweak()
             self.apply_klab_main_controls_geometry_tweaks()
         if 'dev' in VERSION.lower():
@@ -749,10 +756,10 @@ class MainControls(QMainWindow):
         """Increase Main Controls width and distribute it across top panels."""
         try:
             extra_width = int(
-                self.cfg['sys'].get('klab_main_controls_extra_width', '48'))
+                self.cfg['sys'].get('klab_main_controls_extra_width', '128'))
         except Exception:
-            extra_width = 48
-        extra_width = max(0, min(extra_width, 240))
+            extra_width = 128
+        extra_width = max(128, min(extra_width, 360))
         if extra_width == 0:
             return
 
@@ -763,16 +770,20 @@ class MainControls(QMainWindow):
             self.tabWidget.setMinimumWidth(
                 self.tabWidget.minimumWidth() + extra_width)
         if hasattr(self, 'gridLayout'):
-            # Main controls top row has 4 columns (SEM/OV/Grid/Manual commands).
-            # Keep stretch uniform so added width is shared evenly.
-            for col in range(4):
-                self.gridLayout.setColumnStretch(col, 1)
+            column_min_widths = (182, 194, 194, 156)
+            column_stretches = (19, 23, 23, 18)
+            for col, min_width in enumerate(column_min_widths):
+                self.gridLayout.setColumnMinimumWidth(col, min_width)
+            for col, stretch in enumerate(column_stretches):
+                self.gridLayout.setColumnStretch(col, stretch)
 
     def apply_klab_main_controls_geometry_tweaks(self):
         """Apply KLAB-only geometry tweaks for fixed-position controls."""
         if not self.use_klab_ui:
             return
 
+        self._klab_layout_sem_panel()
+        self._klab_layout_stage_panel()
         self._klab_adjust_selector_with_button(
             self.groupBox_3,
             self.comboBox_gridSelector,
@@ -794,15 +805,18 @@ class MainControls(QMainWindow):
             self.groupBox_2,
             self.comboBox_OVSelector,
             self.pushButton_OVSettings)
+        self._klab_layout_overviews_panel()
+        self._klab_layout_grids_panel()
 
         # Expand left/right option text lanes in stack acquisition panel.
         line_x = self.line.x() if hasattr(self, 'line') else 335
         if hasattr(self, 'groupBox_5') and hasattr(self, 'line'):
             panel_width = self.groupBox_5.width()
-            base_divider_x = 350  # native is 335; keep divider shifted right
-            divider_x = max(345, min(base_divider_x, panel_width - 250))
+            base_divider_x = 362  # native is 335; reserve a wider metrics lane
+            divider_x = max(352, min(base_divider_x, panel_width - 310))
             self.line.move(divider_x, self.line.y())
             line_x = self.line.x()
+        self._klab_layout_stack_header(line_x)
         right_col_text_x = min(
             self.checkBox_mirrorDrive.x(),
             self.checkBox_monitorTiles.x(),
@@ -851,42 +865,20 @@ class MainControls(QMainWindow):
             cb_width = max(104, right_btn_x - cb.x() - right_col_gap)
             cb.setGeometry(cb.x(), cb.y(), cb_width, cb.height())
 
-        # Restore native-like right-side spacing, shifted with the divider.
         if hasattr(self, 'groupBox_5'):
-            native_divider_x = 335
-            shift = line_x - native_divider_x
-            panel_width = self.groupBox_5.width()
-            right_margin = 10
-
-            # (widget, native_x, native_w)
-            right_items = (
-                (self.label_dose_3, 360, 131),
-                (self.label_dose, 500, 171),
-                (self.label_dimensions_2, 360, 121),
-                (self.label_totalArea, 360, 111),
-                (self.label_6, 560, 71),
-                (self.label_totalData, 560, 91),
-                (self.label, 360, 301),
-                (self.label_totalDuration, 360, 301),
-                (self.label_2, 360, 301),
-                (self.label_dateEstimate, 360, 301),
-                (self.progressBar, 360, 291),
-                (self.label_cp, 360, 91),
-                (self.label_currentPosition, 450, 201),
-            )
-            for widget, native_x, native_w in right_items:
-                x = native_x + shift
-                w = min(native_w, max(90, panel_width - right_margin - x))
-                widget.setGeometry(x, widget.y(), w, widget.height())
+            self._klab_layout_stack_metrics_panel(line_x)
 
         # Center manual commands panel buttons horizontally.
         panel_width = self.groupBox_8.width()
+        action_button_width = min(max(self.pushButton_doApproach.width(), 108),
+                                  max(96, panel_width - 20))
         for btn in (
                 self.pushButton_doApproach,
                 self.pushButton_doSweep,
                 self.pushButton_grabFrame,
                 self.pushButton_saveViewport,
                 self.pushButton_EHTToggle):
+            btn.setFixedWidth(action_button_width)
             btn_x = max(10, int((panel_width - btn.width()) / 2))
             btn.move(btn_x, btn.y())
 
@@ -899,6 +891,7 @@ class MainControls(QMainWindow):
         self.pushButton_FCC.move(
             pair_start_x + self.pushButton_VP.width() + pair_gap,
             self.pushButton_FCC.y())
+        self._klab_refresh_main_controls_label_texts()
 
     def _klab_adjust_selector_with_button(self, group_box, combo_box, button):
         """Resize selector combo and keep settings button docked right."""
@@ -911,6 +904,253 @@ class MainControls(QMainWindow):
         combo_box.setGeometry(
             left_x, combo_box.y(), new_combo_width, combo_box.height())
         button.move(new_button_x, button.y())
+
+    def _klab_capture_main_controls_label_texts(self):
+        for label in self._klab_tracked_labels():
+            label.setProperty('_klab_full_text', label.text())
+
+    def _klab_tracked_labels(self):
+        return (
+            self.label_SEM,
+            self.label_microtome,
+            self.label_beamSettings,
+            self.label_le,
+            self.label_lcsp,
+            self.label_currentStageXY,
+            self.label_currentStageZ,
+            self.label_fs_2,
+            self.label_ps_2,
+            self.label_dt_2,
+            self.label_10,
+            self.label_o_2,
+            self.label_OVSize,
+            self.label_OVMagnification,
+            self.label_OVDwellTime,
+            self.label_OVLocation,
+            self.label_debrisDetectionArea,
+            self.label_g,
+            self.label_fs,
+            self.label_at,
+            self.label_ps,
+            self.label_dt,
+            self.label_o,
+            self.label_gridSize,
+            self.label_numberActiveTiles,
+            self.label_tileSize,
+            self.label_tilePixelSize,
+            self.label_tileDwellTime,
+            self.label_gridOrigin,
+            self.label_t,
+            self.label_target,
+            self.label_st,
+            self.label_sliceThickness,
+            self.label_dose_3,
+            self.label_dose,
+            self.label_dimensions_2,
+            self.label_totalArea,
+            self.label_dimensions_3,
+            self.label_totalZ,
+            self.label_6,
+            self.label_totalData,
+            self.label,
+            self.label_totalDuration,
+            self.label_2,
+            self.label_dateEstimate,
+            self.label_cp,
+            self.label_currentPosition,
+            self.label_acqIndicator,
+        )
+
+    def _klab_set_label_text(self, label, text):
+        full_text = '' if text is None else str(text)
+        label.setProperty('_klab_full_text', full_text)
+        if not self.use_klab_ui:
+            label.setText(full_text)
+            return
+        self._klab_apply_label_elide(label)
+
+    def _klab_apply_label_elide(self, label):
+        full_text = label.property('_klab_full_text')
+        if full_text is None:
+            full_text = label.text()
+            label.setProperty('_klab_full_text', full_text)
+        full_text = str(full_text)
+        if label.wordWrap():
+            label.setText(full_text)
+            label.setToolTip('')
+            return
+        available_width = max(12, label.contentsRect().width() - 2)
+        elided = label.fontMetrics().elidedText(
+            full_text, Qt.ElideRight, available_width)
+        label.setText(elided)
+        label.setToolTip(full_text if elided != full_text else '')
+
+    def _klab_refresh_main_controls_label_texts(self):
+        if not self.use_klab_ui:
+            return
+        for label in self._klab_tracked_labels():
+            self._klab_apply_label_elide(label)
+
+    def _klab_text_width(self, widget):
+        text = widget.property('_klab_full_text')
+        if text is None:
+            text = widget.text()
+        return widget.fontMetrics().horizontalAdvance(str(text).replace('&', ''))
+
+    def _klab_dock_widget_before_button(
+            self, group_box, widget, button, gap=4, right_margin=4):
+        button_x = group_box.width() - right_margin - button.width()
+        widget_width = max(60, button_x - gap - widget.x())
+        widget.setGeometry(widget.x(), widget.y(), widget_width, widget.height())
+        button.move(button_x, button.y())
+
+    def _klab_layout_pair_columns(
+            self, group_box, label_value_pairs, left_margin=10,
+            right_margin=10, gap=8, max_label_ratio=0.54):
+        if not label_value_pairs:
+            return
+        available_width = max(100, group_box.width() - left_margin - right_margin)
+        widest_label = max(self._klab_text_width(label)
+                           for label, _ in label_value_pairs)
+        label_width = max(60, widest_label + 4)
+        label_width = min(label_width, int(available_width * max_label_ratio))
+        value_x = left_margin + label_width + gap
+        value_width = max(52, group_box.width() - right_margin - value_x)
+        for label, value in label_value_pairs:
+            label.setGeometry(left_margin, label.y(), label_width, label.height())
+            value.setGeometry(value_x, value.y(), value_width, value.height())
+
+    def _klab_expand_full_row(self, group_box, widgets, left_margin=10, right_margin=10):
+        row_width = max(40, group_box.width() - left_margin - right_margin)
+        for widget in widgets:
+            widget.setGeometry(left_margin, widget.y(), row_width, widget.height())
+
+    def _klab_layout_sem_panel(self):
+        self._klab_dock_widget_before_button(
+            self.groupBox_SEM, self.label_SEM, self.pushButton_SEMSettings)
+        beam_label_width = max(36, self._klab_text_width(self.label_le) + 4)
+        beam_value_x = self.label_le.x() + beam_label_width + 6
+        beam_value_width = max(52, self.groupBox_SEM.width() - 10 - beam_value_x)
+        self.label_le.setGeometry(
+            self.label_le.x(), self.label_le.y(),
+            beam_label_width, self.label_le.height())
+        self.label_beamSettings.setGeometry(
+            beam_value_x, self.label_beamSettings.y(),
+            beam_value_width, self.label_beamSettings.height())
+
+    def _klab_layout_stage_panel(self):
+        self._klab_dock_widget_before_button(
+            self.groupBox_stage, self.label_microtome,
+            self.pushButton_microtomeSettings)
+        self._klab_expand_full_row(
+            self.groupBox_stage,
+            (self.label_lcsp, self.label_currentStageXY, self.label_currentStageZ))
+
+    def _klab_layout_overviews_panel(self):
+        self._klab_layout_pair_columns(
+            self.groupBox_2,
+            (
+                (self.label_fs_2, self.label_OVSize),
+                (self.label_ps_2, self.label_OVMagnification),
+                (self.label_dt_2, self.label_OVDwellTime),
+            ),
+            max_label_ratio=0.50)
+        self._klab_expand_full_row(
+            self.groupBox_2,
+            (
+                self.label_10,
+                self.label_debrisDetectionArea,
+                self.label_o_2,
+                self.label_OVLocation,
+            ))
+
+    def _klab_layout_grids_panel(self):
+        self._klab_layout_pair_columns(
+            self.groupBox_3,
+            (
+                (self.label_g, self.label_gridSize),
+                (self.label_fs, self.label_tileSize),
+                (self.label_at, self.label_numberActiveTiles),
+                (self.label_ps, self.label_tilePixelSize),
+                (self.label_dt, self.label_tileDwellTime),
+            ),
+            max_label_ratio=0.46)
+        self._klab_expand_full_row(
+            self.groupBox_3,
+            (self.label_o, self.label_gridOrigin))
+
+    def _klab_layout_stack_header(self, divider_x):
+        right_btn_x = divider_x - self.pushButton_acqSettings.width() - 8
+        self.pushButton_acqSettings.move(right_btn_x, self.pushButton_acqSettings.y())
+        line_edit_width = max(180, right_btn_x - self.lineEdit_baseDir.x() - 8)
+        self.lineEdit_baseDir.setGeometry(
+            self.lineEdit_baseDir.x(), self.lineEdit_baseDir.y(),
+            line_edit_width, self.lineEdit_baseDir.height())
+
+        left_section_right = divider_x - 12
+        section_gap = 14
+        target_label_width = max(96, int((left_section_right - 10) * 0.34))
+        target_value_width = 74
+        target_value_x = self.label_t.x() + target_label_width + 6
+        slice_label_x = target_value_x + target_value_width + section_gap
+        slice_label_width = max(72, left_section_right - slice_label_x - 58)
+        slice_value_width = max(48, left_section_right - slice_label_x)
+
+        self.label_t.setGeometry(
+            self.label_t.x(), self.label_t.y(),
+            target_label_width, self.label_t.height())
+        self.label_target.setGeometry(
+            target_value_x, self.label_t.y() + 18,
+            target_value_width, self.label_target.height())
+        self.label_st.setGeometry(
+            slice_label_x, self.label_st.y(),
+            slice_label_width, self.label_st.height())
+        self.label_sliceThickness.setGeometry(
+            slice_label_x, self.label_st.y() + 18,
+            slice_value_width, self.label_sliceThickness.height())
+
+    def _klab_layout_stack_metrics_panel(self, divider_x):
+        panel_width = self.groupBox_5.width()
+        section_x = divider_x + 24
+        right_margin = 12
+        section_width = max(220, panel_width - right_margin - section_x)
+
+        self.label_dose_3.setGeometry(
+            section_x, 30, section_width, self.label_dose_3.height())
+        self.label_dose.setGeometry(
+            section_x, 47, section_width, self.label_dose.height())
+
+        column_gap = 12
+        metric_top_y = 68
+        metric_value_y = 86
+        metric_col_width = max(72, int((section_width - 2 * column_gap) / 3))
+        metric_x_positions = (
+            section_x,
+            section_x + metric_col_width + column_gap,
+            section_x + 2 * (metric_col_width + column_gap),
+        )
+        metric_pairs = (
+            (self.label_dimensions_2, self.label_totalArea),
+            (self.label_dimensions_3, self.label_totalZ),
+            (self.label_6, self.label_totalData),
+        )
+        for (title_label, value_label), x in zip(metric_pairs, metric_x_positions):
+            title_label.setGeometry(x, metric_top_y, metric_col_width, title_label.height())
+            value_label.setGeometry(x, metric_value_y, metric_col_width, value_label.height())
+
+        self.label.setGeometry(section_x, 108, section_width, self.label.height())
+        self.label_totalDuration.setGeometry(
+            section_x, 126, section_width, self.label_totalDuration.height())
+        self.label_2.setGeometry(section_x, 152, section_width, self.label_2.height())
+        self.label_dateEstimate.setGeometry(
+            section_x, 170, section_width, self.label_dateEstimate.height())
+        self.label_cp.setGeometry(section_x, 225, 112, self.label_cp.height())
+        self.label_currentPosition.setGeometry(
+            section_x + 96, 225,
+            max(110, section_width - 96), self.label_currentPosition.height())
+        self.progressBar.setGeometry(
+            section_x, self.progressBar.y(),
+            section_width, self.progressBar.height())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -948,7 +1188,7 @@ class MainControls(QMainWindow):
             icon_w = 14 if self.use_klab_ui else 18
             icon_h = 8 if self.use_klab_ui else 9
             colour_icon = QPixmap(icon_w, icon_h)
-            rgb = self.gm[i].display_colour_rgb()
+            rgb = self.acq_groups.effective_grid_colour_rgb(i)
             colour_icon.fill(QColor(*rgb))
             label_prefix = ' ' if self.use_klab_ui else '   '
             self.comboBox_gridSelector.addItem(
@@ -985,57 +1225,60 @@ class MainControls(QMainWindow):
     def show_current_settings(self):
         """Show current settings in the upper part of the Main Conrols window"""
         # Installed devices:
-        self.label_SEM.setText(self.sem.device_name)
+        self._klab_set_label_text(self.label_SEM, self.sem.device_name)
         if self.use_microtome:
-            self.label_microtome.setText(self.microtome.device_name)
+            self._klab_set_label_text(
+                self.label_microtome, self.microtome.device_name)
         else:
             self.groupBox_stage.setTitle('Stage (no microtome)')
-            self.label_microtome.setText(self.sem.device_name)
+            self._klab_set_label_text(self.label_microtome, self.sem.device_name)
         # SEM beam settings:
-        self.label_beamSettings.setText(self.sem.get_beam_label())
+        self._klab_set_label_text(
+            self.label_beamSettings, self.sem.get_beam_label())
         # Show dwell time, pixel size, and frame size for current grid:
         grid = self.gm[self.grid_index_dropdown]
         overview = self.ovm[self.ov_index_dropdown]
-        self.label_tileDwellTime.setText(
+        self._klab_set_label_text(self.label_tileDwellTime,
             str(grid.dwell_time) + ' µs')
-        self.label_tilePixelSize.setText(
+        self._klab_set_label_text(self.label_tilePixelSize,
             str(grid.pixel_size) + ' nm')
-        self.label_tileSize.setText(
+        self._klab_set_label_text(self.label_tileSize,
             str(grid.tile_width_p())
             + ' × '
             + str(grid.tile_height_p()))
         # Show settings for current OV:
-        self.label_OVDwellTime.setText(
+        self._klab_set_label_text(self.label_OVDwellTime,
             str(overview.dwell_time) + ' µs')
-        self.label_OVMagnification.setText(
+        self._klab_set_label_text(self.label_OVMagnification,
             f'{overview.magnification:.1f}')
-        self.label_OVSize.setText(
+        self._klab_set_label_text(self.label_OVSize,
             str(overview.width_p())
             + ' × '
             + str(overview.height_p()))
         ov_centre = overview.centre_sx_sy
-        self.label_OVLocation.setText('X: {0:.3f}'.format(ov_centre[0])
+        self._klab_set_label_text(self.label_OVLocation, 'X: {0:.3f}'.format(ov_centre[0])
                                       + ', Y: {0:.3f}'.format(ov_centre[1]))
         # Debris detection area
         if self.acq.use_debris_detection:
-            self.label_debrisDetectionArea.setText(
+            self._klab_set_label_text(self.label_debrisDetectionArea,
                 str(overview.debris_detection_area))
         else:
-            self.label_debrisDetectionArea.setText('-')
+            self._klab_set_label_text(self.label_debrisDetectionArea, '-')
         # Grid parameters
         grid_origin = grid.origin_sx_sy
-        self.label_gridOrigin.setText('X: {0:.3f}'.format(grid_origin[0])
+        self._klab_set_label_text(self.label_gridOrigin, 'X: {0:.3f}'.format(grid_origin[0])
                                       + ', Y: {0:.3f}'.format(grid_origin[1]))
         # Tile grid parameters
         if grid.is_deferred_polygon_roi():
-            self.label_gridSize.setText(
+            self._klab_set_label_text(self.label_gridSize,
                 f'Deferred ({grid.roi_estimated_rows} × '
                 f'{grid.roi_estimated_cols} est.)')
         else:
             grid_size = grid.size
             self.label_gridSize.setText(str(grid_size[0]) + ' × ' +
                                         str(grid_size[1]))
-        self.label_numberActiveTiles.setText(
+        self._klab_set_label_text(self.label_gridSize, self.label_gridSize.text())
+        self._klab_set_label_text(self.label_numberActiveTiles,
             str(grid.number_active_tiles()))
         # Acquisition parameters
         self.lineEdit_baseDir.setText(self.acq.base_dir)
@@ -1049,14 +1292,14 @@ class MainControls(QMainWindow):
         else:
             label = "Target number of slices:"
             n = self.acq.number_slices
-        self.label_t.setText(label)
-        self.label_target.setText(str(n))
+        self._klab_set_label_text(self.label_t, label)
+        self._klab_set_label_text(self.label_target, str(n))
 
         if self.use_microtome:
-            self.label_sliceThickness.setText(
+            self._klab_set_label_text(self.label_sliceThickness,
                 str(self.acq.slice_thickness) + ' nm')
         else:
-            self.label_sliceThickness.setText('---')
+            self._klab_set_label_text(self.label_sliceThickness, '---')
 
     def show_stack_acq_estimates(self):
         """Read current estimates from the stack instance and display
@@ -1068,16 +1311,16 @@ class MainControls(QMainWindow):
         date_estimate, remaining_time) = self.acq.calculate_estimates()
         total_duration = total_imaging + total_stage_moves + total_cutting
         if min_dose == max_dose:
-            self.label_dose.setText(
+            self._klab_set_label_text(self.label_dose,
                 '{0:.1f}'.format(min_dose) + ' electrons per nm²')
         else:
-            self.label_dose.setText(
+            self._klab_set_label_text(self.label_dose,
                 '{0:.2f}'.format(min_dose) + ' .. '
                 + '{0:.1f}'.format(max_dose) + ' electrons per nm²')
         if total_duration == 0:
             total_duration = 1  # prevent division by zero
         days, hours, minutes = utils.get_days_hours_minutes(total_duration)
-        self.label_totalDuration.setText(
+        self._klab_set_label_text(self.label_totalDuration,
             f'{days} d {hours} h {minutes} min     '
             f'({total_imaging/total_duration * 100:.1f}% / '
             f'{total_stage_moves/total_duration * 100:.1f}% / '
@@ -1085,8 +1328,11 @@ class MainControls(QMainWindow):
         self.label_totalArea.setText('{0:.1f}'.format(total_area) + ' µm²')
         self.label_totalZ.setText('{0:.2f}'.format(total_z) + ' µm')
         self.label_totalData.setText('{0:.1f}'.format(total_data) + ' GB')
+        self._klab_set_label_text(self.label_totalArea, self.label_totalArea.text())
+        self._klab_set_label_text(self.label_totalZ, self.label_totalZ.text())
+        self._klab_set_label_text(self.label_totalData, self.label_totalData.text())
         days, hours, minutes = utils.get_days_hours_minutes(remaining_time)
-        self.label_dateEstimate.setText(
+        self._klab_set_label_text(self.label_dateEstimate,
             date_estimate + f'   ({days} d {hours} h {minutes} min remaining)')
 
     def update_acq_options(self):
@@ -1848,7 +2094,7 @@ class MainControls(QMainWindow):
         self.pushButton_startAcq.setEnabled(True)
         self.pushButton_startAcq.setText('START')
         self.progressBar.setValue(0)
-        self.label_currentPosition.setText('---')
+        self._klab_set_label_text(self.label_currentPosition, '---')
 
     def open_new_project_dlg(self):
         """Create a clean project context in one guided action."""
@@ -2010,15 +2256,21 @@ class MainControls(QMainWindow):
         dialog.exec()
 
     def open_ov_dlg(self, selected_ov=None):
-        if selected_ov is None:
-            selected_ov = self.ov_index_dropdown
+        if isinstance(selected_ov, bool) or selected_ov is None:
+            selected_ov = self.comboBox_OVSelector.currentIndex()
+        selected_ov = int(selected_ov)
+        if not 0 <= selected_ov < self.ovm.number_ov:
+            selected_ov = 0
+        self.ov_index_dropdown = selected_ov
+        self.ovm.template_ov_index = selected_ov
         dialog = OVSettingsDlg(self.ovm, self.sem, selected_ov,
-                               self.trigger)
+                               self.trigger, self.imaging_condition_store)
         # self.update_from_ov_dlg() is called when user saves settings
         # or adds/deletes OVs.
         dialog.exec()
 
     def update_from_ov_dlg(self):
+        self.acq_groups.sync_inventory()
         self.update_main_controls_ov_selector(self.ov_index_dropdown)
         self.ft_update_ov_selector(self.ft_selected_ov)
         self.viewport.update_ov()
@@ -2039,12 +2291,14 @@ class MainControls(QMainWindow):
 
     def open_grid_dlg(self, selected_grid):
         dialog = GridSettingsDlg(self.gm, self.sem, selected_grid,
-                                 self.trigger, self.magc_mode)
+                                 self.trigger, self.imaging_condition_store,
+                                 self.magc_mode, acq_groups=self.acq_groups)
         # self.update_from_grid_dlg() is called when user saves settings
         # or adds/deletes grids.
         dialog.exec()
 
     def update_from_grid_dlg(self):
+        self.acq_groups.sync_inventory()
         # Update selectors
         self.update_main_controls_grid_selector(self.grid_index_dropdown)
         self.ft_update_grid_selector(self.ft_selected_grid)
@@ -2056,6 +2310,15 @@ class MainControls(QMainWindow):
             self.ovm.update_all_debris_detections_areas(self.gm)
         self.show_current_settings()
         self.show_stack_acq_estimates()
+        self.viewport.vp_draw()
+
+    def update_from_acquisition_manager(self):
+        self.acq_groups.sync_inventory()
+        self.update_main_controls_grid_selector(self.grid_index_dropdown)
+        self.update_main_controls_ov_selector(self.ov_index_dropdown)
+        self.show_current_settings()
+        self.show_stack_acq_estimates()
+        self.viewport._refresh_acquisition_manager()
         self.viewport.vp_draw()
 
     def open_acq_settings_dlg(self):
@@ -2207,8 +2470,8 @@ class MainControls(QMainWindow):
                         str(current_slice) + "      (no cut after acq.)")
 
 
-        self.label_cp.setText(progress_type)
-        self.label_currentPosition.setText(progress_position)
+        self._klab_set_label_text(self.label_cp, progress_type)
+        self._klab_set_label_text(self.label_currentPosition, progress_position)
         if progress_value is not None:
             self.progressBar.setValue(int(progress_value * 100))
 
@@ -2218,7 +2481,7 @@ class MainControls(QMainWindow):
             pos_info = ('X: unknown    Y: unknown')
         else:
             pos_info = ('X: {0:.3f}    Y: {1:.3f}'.format(*xy_pos))
-        self.label_currentStageXY.setText(pos_info)
+        self._klab_set_label_text(self.label_currentStageXY, pos_info)
         QApplication.processEvents() # ensures changes are shown without delay
 
     def show_current_stage_z(self):
@@ -2227,7 +2490,7 @@ class MainControls(QMainWindow):
             pos_info = 'Z: unknown'
         else:
             pos_info = 'Z: {0:.3f}'.format(z_pos)
-        self.label_currentStageZ.setText(pos_info)
+        self._klab_set_label_text(self.label_currentStageZ, pos_info)
         QApplication.processEvents()
 
     def set_statusbar(self, msg):
@@ -2245,7 +2508,7 @@ class MainControls(QMainWindow):
         pal = QPalette(self.label_acqIndicator.palette())
         pal.setColor(QPalette.WindowText, QColor(Qt.red))
         self.label_acqIndicator.setPalette(pal)
-        self.label_acqIndicator.setText(label_text)
+        self._klab_set_label_text(self.label_acqIndicator, label_text)
         self.set_statusbar(statusbar_text)
         self.busy = busy_state
 
@@ -2332,6 +2595,8 @@ class MainControls(QMainWindow):
             self.update_from_grid_dlg()
         elif msg == 'OV SETTINGS CHANGED':
             self.update_from_ov_dlg()
+        elif msg == 'ACQ GROUPS CHANGED':
+            self.update_from_acquisition_manager()
         elif msg == 'GRAB VP SCREENSHOT':
             self.viewport.grab_viewport_screenshot(*args, **kwargs)
         elif msg == 'DRAW VP':
@@ -3002,7 +3267,7 @@ class MainControls(QMainWindow):
             self.pushButton_resetAcq.setEnabled(False)
             self.pushButton_pauseAcq.setEnabled(False)
             self.pushButton_startAcq.setEnabled(True)
-            self.label_currentPosition.setText('---')
+            self._klab_set_label_text(self.label_currentPosition, '---')
             self.progressBar.setValue(0)
             self.show_stack_acq_estimates()
             self.pushButton_startAcq.setText('START')
@@ -3104,6 +3369,7 @@ class MainControls(QMainWindow):
         self.acq.save_to_cfg()
         self.gm.save_to_cfg()
         self.ovm.save_to_cfg()
+        self.acq_groups.save_to_cfg()
         self.tm.save_to_cfg()
         self.imported.save_to_cfg()
         self.autofocus.save_to_cfg()

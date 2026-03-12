@@ -1,8 +1,12 @@
 from qtpy.QtCore import Qt
-from qtpy.QtWidgets import QDialog
+from qtpy.QtWidgets import QComboBox, QDialog, QLabel, QPushButton
 from qtpy.uic import loadUi
 
 import utils
+from dialog.ImagingConditionSupport import (
+    ImagingConditionController,
+    OverviewImagingConditionAdapter,
+)
 
 
 class OVSettingsDlg(QDialog):
@@ -10,17 +14,17 @@ class OVSettingsDlg(QDialog):
     overview images.
     """
 
-    def __init__(self, ovm, sem, current_ov, main_controls_trigger):
+    def __init__(self, ovm, sem, current_ov, main_controls_trigger,
+                 imaging_condition_store):
         super().__init__()
         self.ovm = ovm
         self.sem = sem
         self.current_ov = current_ov
         self.main_controls_trigger = main_controls_trigger
+        self.imaging_condition_store = imaging_condition_store
         loadUi('gui/overview_settings_dlg.ui', self)
         self.setWindowModality(Qt.ApplicationModal)
         self.setWindowIcon(utils.get_window_icon())
-        self.setFixedSize(self.size())
-        self.show()
         # Set up OV selector
         self.comboBox_OVSelector.addItems(self.ovm.ov_selector_list())
         self.comboBox_OVSelector.setCurrentIndex(self.current_ov)
@@ -51,6 +55,83 @@ class OVSettingsDlg(QDialog):
         self.update_buttons()
         self.show_current_settings()
         self.show_frame_size()
+        self._setup_imaging_condition_controls()
+        self.setFixedSize(self.size())
+        self.show()
+
+    def _shift_widgets_y(self, widgets, delta):
+        for widget in widgets:
+            widget.move(widget.x(), widget.y() + delta)
+
+    def _setup_imaging_condition_controls(self):
+        preset_delta = 118
+        save_as_delta = 30
+        self._shift_widgets_y(
+            [
+                self.label_oi,
+                self.spinBox_acqInterval,
+                self.label_oi_2,
+                self.spinBox_acqIntervalOffset,
+                self.label_expl1,
+                self.label_expl2,
+                self.radioButton_active,
+                self.radioButton_inactive,
+                self.pushButton_clearViewportImage,
+                self.line,
+                self.pushButton_save,
+                self.pushButton_addOV,
+                self.pushButton_deleteOV,
+                self.buttonBox,
+            ],
+            preset_delta)
+        self._shift_widgets_y(
+            [
+                self.pushButton_addOV,
+                self.pushButton_deleteOV,
+                self.buttonBox,
+            ],
+            save_as_delta)
+        self.resize(self.width(), self.height() + preset_delta + save_as_delta)
+
+        left_x = self.pushButton_save.x()
+        full_width = self.pushButton_save.width()
+        sem_button_y = self.comboBox_bitDepth.y() + self.comboBox_bitDepth.height() + 8
+        self.pushButton_getFromSEM = QPushButton(
+            'Get current settings from SEM', self)
+        self.pushButton_getFromSEM.setGeometry(left_x, sem_button_y, full_width, 23)
+        self.label_savedImagingCondition = QLabel(
+            'Saved imaging condition:', self)
+        self.label_savedImagingCondition.setGeometry(
+            left_x, sem_button_y + 31, full_width, 18)
+        self.comboBox_savedImagingCondition = QComboBox(self)
+        self.comboBox_savedImagingCondition.setGeometry(
+            left_x, sem_button_y + 51, full_width, 22)
+        self.pushButton_applySavedImagingCondition = QPushButton(
+            'Apply saved settings', self)
+        self.pushButton_applySavedImagingCondition.setGeometry(
+            left_x, sem_button_y + 81, 116, 23)
+        self.pushButton_manageImagingConditions = QPushButton(
+            'Manage...', self)
+        self.pushButton_manageImagingConditions.setGeometry(
+            left_x + 124, sem_button_y + 81, 77, 23)
+        self.pushButton_saveCurrentImagingConditionAs = QPushButton(
+            'Save current settings as...', self)
+        self.pushButton_saveCurrentImagingConditionAs.setGeometry(
+            self.pushButton_save.x(),
+            self.pushButton_save.y() + 30,
+            self.pushButton_save.width(),
+            23)
+
+        adapter = OverviewImagingConditionAdapter(self, self.sem)
+        self.imaging_condition_controller = ImagingConditionController(
+            self,
+            self.imaging_condition_store,
+            adapter,
+            self.comboBox_savedImagingCondition,
+            self.pushButton_applySavedImagingCondition,
+            self.pushButton_manageImagingConditions,
+            self.pushButton_saveCurrentImagingConditionAs,
+            self.pushButton_getFromSEM)
 
     def update_active_status(self):
         # If current OV is inactive, disable GUI elements
@@ -103,6 +184,7 @@ class OVSettingsDlg(QDialog):
         self.update_active_status()
         self.update_buttons()
         self.show_current_settings()
+        self.show_frame_size()
 
     def update_buttons(self):
         """Update labels on buttons and disable/enable delete button depending

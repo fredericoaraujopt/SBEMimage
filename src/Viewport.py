@@ -27,6 +27,7 @@ from statistics import mean
 from qtpy.uic import loadUi
 from qtpy.QtWidgets import QWidget, QApplication, QMessageBox, QMenu, \
                            QFrame, QHBoxLayout, QLabel, QToolButton, \
+                           QCheckBox, QPushButton, \
                            QFileDialog
 from qtpy.QtGui import QPixmap, QPainter, QColor, QFont, QIcon, QPen, \
                        QBrush, QKeyEvent, QFontMetrics, QTransform
@@ -36,6 +37,7 @@ import acq_func
 import constants
 import utils
 import viewport_polygon_roi as polygon_roi
+import stub_overview_workflow as stub_workflow
 from image_io import imread
 from dialog.viewport.ModifyImagesDlg import ModifyImagesDlg
 from dialog.viewport.ImportImageDlg import ImportImageDlg
@@ -43,6 +45,7 @@ from dialog.viewport.TemplateRotationDlg import TemplateRotationDlg
 from dialog.viewport.GridRotationDlg import GridRotationDlg
 from dialog.viewport.FocusGradientTileSelectionDlg import FocusGradientTileSelectionDlg
 from dialog.viewport.StubOVDlg import StubOVDlg
+from dialog.viewport.AcquisitionManagerDlg import AcquisitionManagerDlg
 from dialog.viewport.ov_queue_dlg import OVQueueDlg
 from dialog.MotorStatusDlg import MotorStatusDlg
 
@@ -53,6 +56,7 @@ class Viewport(QWidget):
                  ov_manager, grid_manager, imported_images,
                  autofocus, acquisition, img_inspector,
                  main_controls_trigger, template_manager,
+                 imaging_condition_store, acq_groups,
                  use_klab_ui=False):
         super().__init__()
         self.cfg = config
@@ -67,6 +71,8 @@ class Viewport(QWidget):
         self.acq = acquisition
         self.img_inspector = img_inspector
         self.main_controls_trigger = main_controls_trigger
+        self.imaging_condition_store = imaging_condition_store
+        self.acq_groups = acq_groups
         self.use_klab_ui = use_klab_ui
 
         # Set Viewport zoom parameters depending on which stage is used for XY
@@ -93,6 +99,7 @@ class Viewport(QWidget):
         self.measure_complete = False
         self.help_panel_visible = False
         self.stub_ov_centre = [None, None]
+        self.stub_ov_dialog = None
 
         # Set up trigger and queue to update viewport from the
         # acquisition thread or dialog windows.
@@ -123,6 +130,7 @@ class Viewport(QWidget):
         self.selected_ov = None
         self.selected_imported = None
         self.ov_queue_dlg = None
+        self.acquisition_manager_dlg = None
         self._vp_grid_acq_in_progress = False
         self._vp_grid_acq_index = None
         self._vp_acq_state_backup = None
@@ -141,6 +149,7 @@ class Viewport(QWidget):
         self.cfg['viewport']['show_axes'] = str(self.show_axes)
         self.cfg['viewport']['show_stub_ov'] = str(self.show_stub_ov)
         self.cfg['viewport']['show_imported'] = str(self.show_imported)
+        self.cfg['viewport']['show_grid_lines'] = str(self.show_grid_lines)
         self.cfg['viewport']['show_native_resolution'] = str(
             self.show_native_res)
         self.cfg['viewport']['show_saturated_pixels'] = str(
@@ -164,7 +173,12 @@ class Viewport(QWidget):
 
     def _load_gui(self):
         loadUi('gui/viewport.ui', self)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._setup_viewport_selector_controls()
+        self._setup_viewport_display_controls()
         self._setup_polygon_toolbar()
+        self._layout_viewport_selector_controls()
+        self._layout_viewport_display_controls()
         if self.use_klab_ui:
             self.apply_klab_viewport_geometry_tweaks()
         self.setWindowIcon(utils.get_window_icon())
@@ -202,6 +216,133 @@ class Viewport(QWidget):
         self._layout_polygon_toolbar()
         self._rebuild_polygon_toolbar()
 
+    def _setup_viewport_selector_controls(self):
+        if hasattr(self, 'pushButton_acquisitionManager'):
+            return
+        self.pushButton_acquisitionManager = QPushButton(
+            'Acquisition manager', self.frame)
+        self.pushButton_acquisitionManager.setObjectName(
+            'pushButton_acquisitionManager')
+        self.pushButton_acquisitionManager.setToolTip(
+            'Open the acquisition manager for grouped overview and grid control.')
+
+    def _layout_viewport_selector_controls(self, combo_margin=10, combo_gap=8,
+                                           min_selector_width=96,
+                                           min_secondary_width=108):
+        if not hasattr(self, 'pushButton_acquisitionManager'):
+            return
+
+        frame1_width = self.frame.width()
+        selector_width = max(
+            min_selector_width,
+            QFontMetrics(self.comboBox_gridSelectorVP.font()).horizontalAdvance(
+                'All grids') + 26)
+        selector_width = min(
+            selector_width,
+            max(min_selector_width, frame1_width - 150))
+        selector_x = combo_margin
+        tile_x = selector_x + selector_width + combo_gap
+        tile_width = max(
+            min_secondary_width,
+            frame1_width - tile_x - combo_margin)
+        self.comboBox_gridSelectorVP.setGeometry(
+            selector_x, self.comboBox_gridSelectorVP.y(),
+            selector_width, self.comboBox_gridSelectorVP.height())
+        self.comboBox_tilePreviewSelectorVP.setGeometry(
+            tile_x, self.comboBox_tilePreviewSelectorVP.y(),
+            tile_width, self.comboBox_tilePreviewSelectorVP.height())
+
+        button_metrics = QFontMetrics(self.pushButton_acquisitionManager.font())
+        button_width = max(
+            132,
+            button_metrics.horizontalAdvance('Acquisition manager') + 24)
+        button_width = min(
+            button_width,
+            max(108, frame1_width - 120))
+        button_y = max(
+            self.comboBox_gridSelectorVP.y() + self.comboBox_gridSelectorVP.height() + 5,
+            self.label_mousePos.y() - 2)
+        self.pushButton_acquisitionManager.setGeometry(
+            combo_margin, button_y,
+            button_width, self.pushButton_acquisitionManager.sizeHint().height())
+        mouse_x = self.pushButton_acquisitionManager.x() + button_width + combo_gap
+        self.label_mousePos.setGeometry(
+            mouse_x, self.label_mousePos.y(),
+            max(54, frame1_width - mouse_x - combo_margin),
+            self.label_mousePos.height())
+
+    def _setup_viewport_display_controls(self):
+        if hasattr(self, 'checkBox_showGridLines'):
+            return
+        self.checkBox_showGridLines = QCheckBox('Show grid lines', self.frame_3)
+        self.checkBox_showGridLines.setObjectName('checkBox_showGridLines')
+        self.checkBox_showGridLines.setToolTip(
+            'Show or hide grid outlines in the Viewport. Shortcut: H')
+
+    def _layout_viewport_display_controls(self, combo_margin=10):
+        if not hasattr(self, 'checkBox_showGridLines'):
+            return
+
+        frame3_width = self.frame_3.width()
+        help_margin = 8
+        row_gap = 6
+        metrics = QFontMetrics(self.checkBox_showStagePos.font())
+        row1_y = self.checkBox_showAxes.y()
+        row2_y = self.checkBox_showLabels.y()
+        row3_y = self.checkBox_showStagePos.y()
+        grid_toggle_height = self.checkBox_showGridLines.height()
+        axes_toggle_height = self.checkBox_showAxes.height()
+
+        if self.use_klab_ui:
+            # Match the native viewport checkbox row rhythm so the added KLAB
+            # grid-lines toggle does not overlap the existing rows.
+            grid_toggle_height = self.checkBox_showLabels.height()
+            axes_toggle_height = self.checkBox_showLabels.height()
+            row_spacing = row3_y - row2_y
+            if row_spacing > 0:
+                row1_y = row2_y - row_spacing
+
+        show_grid_width = metrics.horizontalAdvance('Show grid lines') + 26
+        show_axes_width = metrics.horizontalAdvance('Show axes') + 26
+        left_col_width = max(
+            show_grid_width + row_gap + show_axes_width,
+            metrics.horizontalAdvance('Show labels') + 26,
+            metrics.horizontalAdvance('Show stage position') + 26)
+        left_col_width = min(left_col_width, 210)
+
+        self.checkBox_showGridLines.setGeometry(
+            combo_margin, row1_y,
+            show_grid_width, grid_toggle_height)
+        self.checkBox_showAxes.setGeometry(
+            combo_margin + show_grid_width + row_gap, row1_y,
+            show_axes_width, axes_toggle_height)
+        self.checkBox_showLabels.setGeometry(
+            combo_margin, row2_y,
+            left_col_width, self.checkBox_showLabels.height())
+        self.checkBox_showStagePos.setGeometry(
+            combo_margin, row3_y,
+            left_col_width, self.checkBox_showStagePos.height())
+
+        self.pushButton_helpViewport.move(
+            frame3_width - self.pushButton_helpViewport.width() - help_margin,
+            self.pushButton_helpViewport.y())
+
+        slider_x = left_col_width + 20
+        slider_width = max(
+            120,
+            self.pushButton_helpViewport.x() - slider_x - 8)
+        self.label_4.move(
+            max(combo_margin, slider_x - self.label_4.width() - 6),
+            self.label_4.y())
+        self.horizontalSlider_VP.setGeometry(
+            slider_x, self.horizontalSlider_VP.y(),
+            slider_width, self.horizontalSlider_VP.height())
+        self.label_6.move(slider_x, self.label_6.y())
+        self.label_FOVSize.setGeometry(
+            slider_x + 32, self.label_FOVSize.y(),
+            max(90, self.pushButton_helpViewport.x() - (slider_x + 32) - 8),
+            self.label_FOVSize.height())
+
     def _layout_polygon_toolbar(self):
         if not hasattr(self, 'frame_polygonTools'):
             return
@@ -218,27 +359,11 @@ class Viewport(QWidget):
         min_selector_width = 96
         min_secondary_width = 108
 
-        # Frame 1: grid + tile-preview selectors (make "All grids" fully visible).
-        frame1_width = self.frame.width()
-        selector_width = max(
-            min_selector_width,
-            QFontMetrics(self.comboBox_gridSelectorVP.font()).horizontalAdvance(
-                'All grids') + 26)
-        selector_width = min(selector_width, max(min_selector_width, frame1_width - 150))
-        selector_x = combo_margin
-        tile_x = selector_x + selector_width + combo_gap
-        tile_width = max(
-            min_secondary_width,
-            frame1_width - tile_x - combo_margin)
-        self.comboBox_gridSelectorVP.setGeometry(
-            selector_x, self.comboBox_gridSelectorVP.y(),
-            selector_width, self.comboBox_gridSelectorVP.height())
-        self.comboBox_tilePreviewSelectorVP.setGeometry(
-            tile_x, self.comboBox_tilePreviewSelectorVP.y(),
-            tile_width, self.comboBox_tilePreviewSelectorVP.height())
-        self.label_mousePos.setGeometry(
-            combo_margin, self.label_mousePos.y(),
-            max(140, frame1_width - 2 * combo_margin), self.label_mousePos.height())
+        self._layout_viewport_selector_controls(
+            combo_margin=combo_margin,
+            combo_gap=combo_gap,
+            min_selector_width=min_selector_width,
+            min_secondary_width=min_secondary_width)
 
         # Frame 2: OV selector + action buttons, keep buttons right with fixed gap.
         frame2_width = self.frame_2.width()
@@ -261,39 +386,8 @@ class Viewport(QWidget):
         self.pushButton_measureViewport.move(measure_x, self.pushButton_measureViewport.y())
         self.pushButton_updateStagePos.move(measure_x, self.pushButton_updateStagePos.y())
 
-        # Frame 3: ensure labels and stage-position checkbox fit; keep FOV controls separated.
-        frame3_width = self.frame_3.width()
-        check_metrics = QFontMetrics(self.checkBox_showStagePos.font())
-        left_col_width = max(
-            check_metrics.horizontalAdvance('Show stage position') + 26,
-            check_metrics.horizontalAdvance('Show labels') + 26,
-            check_metrics.horizontalAdvance('Show axes') + 26)
-        left_col_width = min(left_col_width, 168)
-        self.checkBox_showAxes.setGeometry(
-            combo_margin, self.checkBox_showAxes.y(),
-            left_col_width, self.checkBox_showAxes.height())
-        self.checkBox_showLabels.setGeometry(
-            combo_margin, self.checkBox_showLabels.y(),
-            left_col_width, self.checkBox_showLabels.height())
-        self.checkBox_showStagePos.setGeometry(
-            combo_margin, self.checkBox_showStagePos.y(),
-            left_col_width, self.checkBox_showStagePos.height())
-        self.pushButton_helpViewport.move(
-            frame3_width - self.pushButton_helpViewport.width() - 8,
-            self.pushButton_helpViewport.y())
-        slider_x = left_col_width + 50
-        slider_width = max(
-            120,
-            self.pushButton_helpViewport.x() - slider_x - 8)
-        self.label_4.move(slider_x - 40, self.label_4.y())
-        self.horizontalSlider_VP.setGeometry(
-            slider_x, self.horizontalSlider_VP.y(),
-            slider_width, self.horizontalSlider_VP.height())
-        self.label_6.move(slider_x, self.label_6.y())
-        self.label_FOVSize.setGeometry(
-            slider_x + 32, self.label_FOVSize.y(),
-            max(90, self.pushButton_helpViewport.x() - (slider_x + 32) - 8),
-            self.label_FOVSize.height())
+        # Frame 3: display toggles + FOV controls.
+        self._layout_viewport_display_controls(combo_margin=combo_margin)
 
     def _clear_polygon_toolbar_layout(self):
         while self.frame_polygonToolsLayout.count():
@@ -533,6 +627,34 @@ class Viewport(QWidget):
             self.cs.vp_width / self.cs.vp_scale,
             self.cs.vp_height / self.cs.vp_scale)
 
+    def _vp_grid_render_flags(self, suppress_previews=False):
+        """Return effective grid-layer visibility flags for the viewport."""
+        if self.vp_tile_preview_mode == 0:   # No previews, only show grid lines
+            show_grid, show_previews, with_gaps = True, False, False
+        elif self.vp_tile_preview_mode == 1: # Show previews with grid lines
+            show_grid, show_previews, with_gaps = True, True, False
+        elif self.vp_tile_preview_mode == 2: # Show previews without grid lines
+            show_grid, show_previews, with_gaps = False, True, False
+        elif self.vp_tile_preview_mode == 3: # Show previews with gaps, no grid
+            show_grid, show_previews, with_gaps = False, True, True
+        else:
+            show_grid, show_previews, with_gaps = True, False, False
+
+        show_grid = show_grid and self.show_grid_lines
+        previews_temporarily_suppressed = (
+            suppress_previews
+            or self.fov_drag_active
+            or self.grid_drag_active)
+        if previews_temporarily_suppressed and show_previews:
+            # Tile previews are intentionally suppressed during interaction for
+            # responsiveness. In preview-only modes, fall back to grid outlines
+            # instead of blanking the grid layer entirely.
+            show_previews = False
+            if not show_grid:
+                show_grid = True
+                with_gaps = False
+        return show_grid, show_previews, with_gaps
+
     def tab_changed(self):
         if self.tabWidget.currentIndex() == 2:  # Acquisition monitor
             # Update motor status
@@ -543,14 +665,17 @@ class Viewport(QWidget):
         when an acquisition is running."""
         self.busy = busy
         idle = not busy
+        self.pushButton_acquisitionManager.setEnabled(idle)
         self.pushButton_refreshOVs.setEnabled(idle)
         self.pushButton_acquireStubOV.setEnabled(idle)
         if idle:
             self.radioButton_fromStack.setChecked(True)
         self.radioButton_fromSEM.setEnabled(idle)
+        self._refresh_acquisition_manager()
 
     def update_grids(self):
         """Update the grid selectors after grid is added or deleted."""
+        self.acq_groups.sync_inventory()
         self.vp_current_grid = -1
         if self.sv_current_grid >= self.gm.number_grids:
             self.sv_current_grid = self.gm.number_grids - 1
@@ -563,14 +688,17 @@ class Viewport(QWidget):
         self.sv_update_tile_selector()
         self.m_update_grid_selector()
         self.m_update_tile_selector()
+        self._refresh_acquisition_manager()
 
     def update_ov(self):
         """Update the overview selectors after overview is added or deleted."""
+        self.acq_groups.sync_inventory()
         self.vp_current_ov = -1
         self.vp_update_ov_selector()
         self.sv_update_ov_selector()
         self.m_update_ov_selector()
         self._refresh_ov_queue()
+        self._refresh_acquisition_manager()
 
     def _update_measure_buttons(self):
         """Display the measuring tool buttons as active or inactive."""
@@ -674,6 +802,12 @@ class Viewport(QWidget):
             self.vp_draw(suppress_labels=True, suppress_previews=True)
         elif msg == 'UPDATE XY':
             self.main_controls_trigger.transmit(msg)
+        elif msg == 'RESTRICT GUI':
+            self.restrict_gui(True)
+            self.main_controls_trigger.transmit(msg)
+        elif msg == 'UNRESTRICT GUI':
+            self.restrict_gui(False)
+            self.main_controls_trigger.transmit(msg)
         elif msg == 'STATUS IDLE':
             self.main_controls_trigger.transmit(msg)
         elif msg == 'STATUS BUSY STUB':
@@ -693,9 +827,11 @@ class Viewport(QWidget):
         elif msg == 'VP GRID ACQ FINISHED':
             self._vp_grid_acq_finished(*args, **kwargs)
         elif msg == 'STUB OV SUCCESS':
-            self._vp_stub_overview_acq_success(True)
+            self._vp_finish_stub_overview('success', *args, **kwargs)
         elif msg == 'STUB OV FAILURE':
-            self._vp_stub_overview_acq_success(False)
+            self._vp_finish_stub_overview('failure', *args, **kwargs)
+        elif msg == 'STUB OV ABORTED':
+            self._vp_finish_stub_overview('aborted', *args, **kwargs)
         elif msg == 'SHOW IMPORTED':
             self.checkBox_showImported.setChecked(True)
         elif msg == 'ARRAY REMOVE IMAGE':
@@ -755,6 +891,7 @@ class Viewport(QWidget):
         recursive_set(self)
 
     def mousePressEvent(self, event):
+        self.setFocus()
         p = event.pos()
         px, py = p.x() - constants.VP_MARGIN_X, p.y() - constants.VP_MARGIN_Y
         mouse_pos_within_viewer = (
@@ -1371,13 +1508,15 @@ class Viewport(QWidget):
             modifiers = event.modifiers()
             if event.key() == Qt.Key_Escape and self.vp_polygon_tool_spec is not None:
                 self._vp_disarm_polygon_tool()
+            elif modifiers == Qt.NoModifier and event.key() == Qt.Key_H:
+                self.vp_toggle_show_grid_lines_shortcut()
             elif event.key() == Qt.Key_Delete:
-                self._vp_delete_selected_polygon()
+                self._vp_delete_selected_grid()
             elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_C:
-                self._vp_copy_selected_polygon()
+                self._vp_copy_selected_grid()
             elif modifiers == Qt.ControlModifier and event.key() == Qt.Key_V:
                 if self.vp_polygon_clipboard is not None:
-                    self._vp_paste_polygon_at(self.cs.vp_centre_dx_dy)
+                    self._vp_paste_grid_at(self.cs.vp_centre_dx_dy)
 
     def resizeEvent(self, event):
         """Adjust the Viewport and Slice-by-slice viewer canvas when the window
@@ -1391,6 +1530,9 @@ class Viewport(QWidget):
         self.sv_canvas = QPixmap(self.cs.vp_width, self.cs.vp_height)
         if self.use_klab_ui:
             self.apply_klab_viewport_geometry_tweaks()
+        else:
+            self._layout_viewport_selector_controls()
+            self._layout_viewport_display_controls()
         self.vp_draw()
         self.sv_draw()
 
@@ -1826,18 +1968,23 @@ class Viewport(QWidget):
             self.gm.refresh_polygon_grid(grid_index, top_left_dx_dy=top_left_dx_dy)
         self.vp_draw()
 
-    def _vp_copy_selected_polygon(self):
+    def _vp_copy_selected_grid(self):
         if self.selected_grid is None:
             return
         grid = self.gm[self.selected_grid]
-        if not grid.has_polygon_roi():
-            return
         self.vp_polygon_clipboard = {
+            'has_polygon_roi': grid.has_polygon_roi(),
             'roi_shape_type': grid.roi_shape_type,
             'roi_shape_name': grid.roi_shape_name,
             'roi_points_norm': json.loads(json.dumps(grid.roi_points_norm)),
+            'roi_materialized': grid.roi_materialized,
+            'roi_estimated_rows': grid.roi_estimated_rows,
+            'roi_estimated_cols': grid.roi_estimated_cols,
+            'roi_estimated_tile_count': grid.roi_estimated_tile_count,
             'sw_sh': [float(grid.sw_sh[0]), float(grid.sw_sh[1])],
             'active': grid.active,
+            'size': [int(grid.size[0]), int(grid.size[1])],
+            'active_tiles': list(grid.active_tiles),
             'frame_size': list(grid.frame_size),
             'frame_size_selector': grid.frame_size_selector,
             'overlap': grid.overlap,
@@ -1855,10 +2002,14 @@ class Viewport(QWidget):
             'wd_gradient_params': list(grid.wd_gradient_params),
         }
 
-    def _vp_paste_polygon_at(self, centre_dx_dy):
+    def _vp_copy_selected_polygon(self):
+        self._vp_copy_selected_grid()
+
+    def _vp_paste_grid_at(self, centre_dx_dy):
         if self.vp_polygon_clipboard is None:
             return
         clip = self.vp_polygon_clipboard
+        pasted_size = [1, 1] if clip['has_polygon_roi'] else clip['size']
         new_grid = self.gm.add_new_grid(
             origin_sx_sy=self.cs.convert_d_to_s((centre_dx_dy[0], centre_dx_dy[1])),
             sw_sh=clip['sw_sh'],
@@ -1878,13 +2029,26 @@ class Viewport(QWidget):
             use_wd_gradient=clip['use_wd_gradient'],
             wd_gradient_ref_tiles=clip['wd_gradient_ref_tiles'],
             wd_gradient_params=clip['wd_gradient_params'],
-            size=[1, 1])
-        new_grid.set_polygon_roi(
-            clip['roi_shape_type'],
-            clip['roi_points_norm'],
-            clip['roi_shape_name'])
+            size=pasted_size)
         new_index = self.gm.number_grids - 1
-        self.gm.refresh_polygon_grid(new_index, centre_dx_dy=centre_dx_dy)
+        if clip['has_polygon_roi']:
+            new_grid.set_polygon_roi(
+                clip['roi_shape_type'],
+                clip['roi_points_norm'],
+                clip['roi_shape_name'])
+            new_grid.sw_sh = [float(clip['sw_sh'][0]), float(clip['sw_sh'][1])]
+            if clip['roi_materialized']:
+                self.gm.refresh_polygon_grid(new_index, centre_dx_dy=centre_dx_dy)
+            else:
+                self.gm.update_deferred_polygon_grid(
+                    new_index, centre_dx_dy=centre_dx_dy)
+        else:
+            new_grid.centre_sx_sy = self.cs.convert_d_to_s(centre_dx_dy)
+            new_grid.sw_sh = [float(clip['sw_sh'][0]), float(clip['sw_sh'][1])]
+
+        new_grid.active_tiles = [
+            tile_index for tile_index in clip['active_tiles']
+            if tile_index < new_grid.number_tiles]
         self.selected_grid = new_index
         self.selected_tile = None
         self.vp_current_grid = new_index
@@ -1892,42 +2056,28 @@ class Viewport(QWidget):
         self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
         self.vp_draw()
 
-    def _vp_duplicate_selected_polygon(self):
+    def _vp_paste_polygon_at(self, centre_dx_dy):
+        self._vp_paste_grid_at(centre_dx_dy)
+
+    def _vp_duplicate_selected_grid(self):
         if self.selected_grid is None:
             return
-        self._vp_copy_selected_polygon()
+        self._vp_copy_selected_grid()
         grid = self.gm[self.selected_grid]
         offset_dx_dy = [
             grid.centre_dx_dy[0] + max(5.0, grid.sw_sh[0] * 0.15),
             grid.centre_dx_dy[1] + max(5.0, grid.sw_sh[1] * 0.15),
         ]
-        self._vp_paste_polygon_at(offset_dx_dy)
+        self._vp_paste_grid_at(offset_dx_dy)
+
+    def _vp_duplicate_selected_polygon(self):
+        self._vp_duplicate_selected_grid()
+
+    def _vp_delete_selected_grid(self):
+        self.vp_delete_grid(self.selected_grid)
 
     def _vp_delete_selected_polygon(self):
-        if self.selected_grid is None:
-            return
-        if self.selected_grid != self.gm.number_grids - 1:
-            QMessageBox.information(
-                self,
-                'Delete polygon ROI',
-                'Only the most recently created grid can be deleted safely.\n'
-                'Delete or move later grids first.',
-                QMessageBox.Ok)
-            return
-        user_reply = QMessageBox.question(
-            self,
-            'Delete polygon ROI',
-            f'This will delete {self.gm.get_grid_label(self.selected_grid)}.\n'
-            'Proceed?',
-            QMessageBox.Ok | QMessageBox.Cancel)
-        if user_reply != QMessageBox.Ok:
-            return
-        self.gm.delete_grid()
-        self.selected_grid = None
-        self.selected_tile = None
-        self.vp_current_grid = -1
-        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
-        self.vp_draw()
+        self._vp_delete_selected_grid()
 
     # ====================== Below: Viewport (vp) methods ==========================
 
@@ -1946,6 +2096,8 @@ class Viewport(QWidget):
             self.cfg['viewport']['show_stub_ov'].lower() == 'true')
         self.show_imported = (
             self.cfg['viewport']['show_imported'].lower() == 'true')
+        self.show_grid_lines = utils.str_to_bool(
+            self.cfg['viewport'].get('show_grid_lines', 'True'))
         self.show_labels = (
             self.cfg['viewport']['show_labels'].lower() == 'true')
         self.show_axes = (
@@ -1997,6 +2149,8 @@ class Viewport(QWidget):
         self.vp_qp = QPainter()
 
         # Buttons
+        self.pushButton_acquisitionManager.clicked.connect(
+            self.vp_open_acquisition_manager)
         self.pushButton_refreshOVs.clicked.connect(self.vp_acquire_overview)
         self.pushButton_acquireStubOV.clicked.connect(
             self._vp_open_stub_overview_dlg)
@@ -2047,6 +2201,9 @@ class Viewport(QWidget):
         self.checkBox_showImported.setChecked(self.show_imported)
         self.checkBox_showImported.stateChanged.connect(
             self.vp_toggle_show_imported)
+        self.checkBox_showGridLines.setChecked(self.show_grid_lines)
+        self.checkBox_showGridLines.stateChanged.connect(
+            self.vp_toggle_show_grid_lines)
         self.checkBox_showStubOV.setChecked(self.show_stub_ov)
         self.checkBox_showStubOV.stateChanged.connect(
             self.vp_toggle_show_stub_ov)
@@ -2113,6 +2270,19 @@ class Viewport(QWidget):
         self.show_axes = self.checkBox_showAxes.isChecked()
         self.vp_draw()
 
+    def vp_toggle_show_grid_lines(self):
+        self.show_grid_lines = self.checkBox_showGridLines.isChecked()
+        self.vp_draw()
+
+    def vp_toggle_show_grid_lines_shortcut(self):
+        if self.tabWidget.currentIndex() != 0:
+            return
+        self.show_grid_lines = not self.show_grid_lines
+        self.checkBox_showGridLines.blockSignals(True)
+        self.checkBox_showGridLines.setChecked(self.show_grid_lines)
+        self.checkBox_showGridLines.blockSignals(False)
+        self.vp_draw()
+
     def vp_toggle_show_stub_ov(self):
         self.show_stub_ov = self.checkBox_showStubOV.isChecked()
         self.vp_draw()
@@ -2151,10 +2321,28 @@ class Viewport(QWidget):
         self.ovm.update_all_debris_detections_areas(self.gm)
         self.main_controls_trigger.transmit('SHOW CURRENT SETTINGS')
         self.vp_draw()
+        self._refresh_acquisition_manager()
 
     def _refresh_ov_queue(self):
         if self.ov_queue_dlg is not None and self.ov_queue_dlg.isVisible():
             self.ov_queue_dlg.refresh_table()
+
+    def _refresh_acquisition_manager(self):
+        if (self.acquisition_manager_dlg is not None
+                and self.acquisition_manager_dlg.isVisible()):
+            self.acquisition_manager_dlg.refresh_view()
+
+    def vp_open_acquisition_manager(self):
+        self.acq_groups.sync_inventory()
+        if self.acquisition_manager_dlg is None:
+            self.acquisition_manager_dlg = AcquisitionManagerDlg(
+                self.acq_groups, self)
+            self.acquisition_manager_dlg.destroyed.connect(
+                lambda *_: setattr(self, 'acquisition_manager_dlg', None))
+        self.acquisition_manager_dlg.show()
+        self.acquisition_manager_dlg.raise_()
+        self.acquisition_manager_dlg.activateWindow()
+        self.acquisition_manager_dlg.refresh_view()
 
     def vp_open_ov_queue_panel(self):
         if self.ov_queue_dlg is None:
@@ -2187,6 +2375,7 @@ class Viewport(QWidget):
             self._add_to_main_log(
                 f'CTRL: {grid.get_label(grid_index)} locked.')
         self.vp_draw()
+        self._refresh_acquisition_manager()
 
     def _vp_toggle_ov_lock(self, ov_index):
         ov = self.ovm[ov_index]
@@ -2206,14 +2395,95 @@ class Viewport(QWidget):
             self._add_to_main_log(f'CTRL: OV {ov_index} locked.')
         self.vp_draw()
         self._refresh_ov_queue()
+        self._refresh_acquisition_manager()
+
+    def _notify_acquisition_manager_state_change(self, update_debris=False):
+        self.acq_groups.sync_inventory()
+        if update_debris and self.ovm.use_auto_debris_area:
+            self.ovm.update_all_debris_detections_areas(self.gm)
+        self.main_controls_trigger.transmit('ACQ GROUPS CHANGED')
+        self._refresh_ov_queue()
+        self._refresh_acquisition_manager()
+        self.vp_draw()
+
+    def vp_clear_overview_image(self, ov_index):
+        if ov_index is None or not (0 <= ov_index < self.ovm.number_ov):
+            return
+        self.ovm[ov_index].vp_file_path = ''
+        self.ovm[ov_index].mark_not_acquired(result='cleared')
+        self._notify_acquisition_manager_state_change()
 
     def _vp_clear_selected_ov_image(self):
-        if self.selected_ov is None:
+        self.vp_clear_overview_image(self.selected_ov)
+
+    def vp_clear_grid_previews(self, grid_index):
+        if grid_index is None or not (0 <= grid_index < self.gm.number_grids):
             return
-        self.ovm[self.selected_ov].vp_file_path = ''
-        self.ovm[self.selected_ov].mark_not_acquired(result='cleared')
-        self.vp_draw()
-        self._refresh_ov_queue()
+        user_reply = QMessageBox.question(
+            self, 'Reset tile previews',
+            f'This will clear all tile preview images in the Viewport for '
+            f'{self.gm.get_grid_label(grid_index)}',
+            QMessageBox.Ok | QMessageBox.Cancel)
+        if user_reply != QMessageBox.Ok:
+            return
+        self.gm[grid_index].clear_all_tile_previews()
+        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+
+    def vp_delete_overview(self, ov_index):
+        if ov_index is None or not (0 <= ov_index < self.ovm.number_ov):
+            return
+        if ov_index == 0:
+            QMessageBox.information(
+                self,
+                'OV 0 protected',
+                'OV 0 is a persistent anchor and cannot be deleted.',
+                QMessageBox.Ok)
+            return
+        if ov_index != self.ovm.number_ov - 1:
+            QMessageBox.information(
+                self,
+                'Delete order',
+                'For consistency, only the highest OV index can be deleted.',
+                QMessageBox.Ok)
+            return
+        user_reply = QMessageBox.question(
+            self,
+            'Delete overview',
+            f'Delete OV {ov_index}?',
+            QMessageBox.Ok | QMessageBox.Cancel)
+        if user_reply != QMessageBox.Ok:
+            return
+        self.ovm.delete_overview()
+        if self.selected_ov == ov_index:
+            self.selected_ov = None
+        self.main_controls_trigger.transmit('OV SETTINGS CHANGED')
+
+    def vp_delete_grid(self, grid_index):
+        if grid_index is None or not (0 <= grid_index < self.gm.number_grids):
+            return
+        if grid_index != self.gm.number_grids - 1:
+            QMessageBox.information(
+                self,
+                'Delete grid',
+                'Only the most recently created grid can be deleted safely.\n'
+                'Delete or move later grids first.',
+                QMessageBox.Ok)
+            return
+        grid_label = self.gm.get_grid_label(grid_index)
+        user_reply = QMessageBox.question(
+            self,
+            'Delete grid',
+            f'This will delete {grid_label}.\n'
+            'Proceed?',
+            QMessageBox.Ok | QMessageBox.Cancel)
+        if user_reply != QMessageBox.Ok:
+            return
+        self.gm.delete_grid()
+        if self.selected_grid == grid_index:
+            self.selected_grid = None
+            self.selected_tile = None
+        self.vp_current_grid = -1
+        self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
 
     def vp_registration_check(self):
         """Quick geometry check between selected tile and selected/containing OV."""
@@ -2363,31 +2633,29 @@ class Viewport(QWidget):
             else:
                 action_changeRotation = None
 
-            polygon_grid_selected = (
-                grid_index is not None and self.gm[grid_index].has_polygon_roi())
-            if polygon_grid_selected:
+            if grid_index is not None:
                 menu.addSeparator()
-                action_copyPolygon = menu.addAction(
-                    f'Copy ROI shape from {grid_label}')
-                action_copyPolygon.triggered.connect(self._vp_copy_selected_polygon)
-                action_duplicatePolygon = menu.addAction(
-                    f'Duplicate ROI shape from {grid_label}')
-                action_duplicatePolygon.triggered.connect(
-                    self._vp_duplicate_selected_polygon)
-                action_deletePolygon = menu.addAction(
-                    f'Delete ROI shape from {grid_label}')
-                action_deletePolygon.triggered.connect(
-                    self._vp_delete_selected_polygon)
+                action_copyGrid = menu.addAction(
+                    f'Copy {grid_label}')
+                action_copyGrid.triggered.connect(self._vp_copy_selected_grid)
+                action_duplicateGrid = menu.addAction(
+                    f'Duplicate {grid_label}')
+                action_duplicateGrid.triggered.connect(
+                    self._vp_duplicate_selected_grid)
+                action_deleteGrid = menu.addAction(
+                    f'Delete {grid_label}')
+                action_deleteGrid.triggered.connect(
+                    self._vp_delete_selected_grid)
                 if self.selected_grid != self.gm.number_grids - 1:
-                    action_deletePolygon.setEnabled(False)
+                    action_deleteGrid.setEnabled(False)
             else:
-                action_copyPolygon = None
-                action_duplicatePolygon = None
-                action_deletePolygon = None
-            action_pastePolygon = menu.addAction('Paste ROI shape here')
-            action_pastePolygon.triggered.connect(
-                lambda: self._vp_paste_polygon_at(self.vp_polygon_context_dx_dy))
-            action_pastePolygon.setEnabled(self.vp_polygon_clipboard is not None)
+                action_copyGrid = None
+                action_duplicateGrid = None
+                action_deleteGrid = None
+            action_pasteGrid = menu.addAction('Paste copied grid here')
+            action_pasteGrid.triggered.connect(
+                lambda: self._vp_paste_grid_at(self.vp_polygon_context_dx_dy))
+            action_pasteGrid.setEnabled(self.vp_polygon_clipboard is not None)
 
             if self.gm.array_mode:
                 action_moveGridCurrentStage = menu.addAction(
@@ -2460,8 +2728,8 @@ class Viewport(QWidget):
             action_modifyImported = menu.addAction('Modify imported images')
             action_modifyImported.triggered.connect(
                 self._vp_open_modify_images_dlg)
-            action_ovQueue = menu.addAction('Open OV queue panel')
-            action_ovQueue.triggered.connect(self.vp_open_ov_queue_panel)
+            action_ovQueue = menu.addAction('Open acquisition manager')
+            action_ovQueue.triggered.connect(self.vp_open_acquisition_manager)
 
             menu.addSeparator()
             if grid_index is not None:
@@ -2759,11 +3027,14 @@ class Viewport(QWidget):
         self.restrict_gui(False)
         self.main_controls_trigger.transmit('STATUS IDLE')
         self.vp_draw()
+        self._refresh_acquisition_manager()
 
-    def _vp_acquire_grid(self):
-        if self.selected_grid is None:
+    def vp_acquire_specific_grid(self, grid_index):
+        if grid_index is None or not (0 <= grid_index < self.gm.number_grids):
             return
-        if len(self.gm[self.selected_grid].active_tiles) == 0:
+        self.selected_grid = grid_index
+        self.selected_tile = None
+        if len(self.gm[grid_index].active_tiles) == 0:
             QMessageBox.warning(
                 self, 'No active tiles',
                 'The currently selected grid has no active tiles',
@@ -2777,18 +3048,21 @@ class Viewport(QWidget):
                 QMessageBox.Ok)
             return
 
-        grid_label = self.gm.get_grid_label(self.selected_grid)
+        grid_label = self.gm.get_grid_label(grid_index)
         self._vp_backup_acq_state()
         self.acq.acq_in_progress = True
         self.acq.acq_run_mode = 'viewport_grid'
         self._vp_grid_acq_in_progress = True
-        self._vp_grid_acq_index = self.selected_grid
+        self._vp_grid_acq_index = grid_index
         self._add_to_main_log(
             f'CTRL: User-requested acquisition of {grid_label} started.')
         self.restrict_gui(True)
         self.main_controls_trigger.transmit('RESTRICT GUI')
         self.main_controls_trigger.transmit('STATUS BUSY GRID')
-        utils.run_log_thread(self._vp_acquire_grid_thread, self.selected_grid)
+        utils.run_log_thread(self._vp_acquire_grid_thread, grid_index)
+
+    def _vp_acquire_grid(self):
+        self.vp_acquire_specific_grid(self.selected_grid)
 
     def _vp_acquire_tile(self):
         active_tiles = self.gm[self.selected_grid].active_tiles
@@ -2831,6 +3105,11 @@ class Viewport(QWidget):
             self.vp_qp.setRenderHint(QPainter.Antialiasing, self.render_antialias)
             # First, show stub OV if option selected and stub OV image exists:
             if self.show_stub_ov:
+                for imported_img_index in range(len(self.imported)):
+                    if self._vp_imported_visible(imported_img_index):
+                        imported = self.imported[imported_img_index]
+                        if imported.is_stub_archive:
+                            self._vp_place_stub_archive(imported_img_index)
                 self._vp_place_stub_overview(self.ovm['stub_lm'])
                 self._vp_place_stub_overview(self.ovm['stub'])
                 # self._place_template()
@@ -2844,19 +3123,12 @@ class Viewport(QWidget):
                 self._vp_place_overview(self.vp_current_ov,
                                         show_debris_area,
                                         suppress_labels)
-            # Tile preview mode
-            if self.vp_tile_preview_mode == 0:   # No previews, only show grid lines
-                show_grid, show_previews, with_gaps = True, False, False
-            elif self.vp_tile_preview_mode == 1: # Show previews with grid lines
-                show_grid, show_previews, with_gaps = True, True, False
-            elif self.vp_tile_preview_mode == 2: # Show previews without grid lines
-                show_grid, show_previews, with_gaps = False, True, False
-            elif self.vp_tile_preview_mode == 3: # Show previews with gaps, no grid
-                show_grid, show_previews, with_gaps = False, True, True
-            if suppress_previews:                # this parameter of vp_draw()
-                show_previews = False            # overrides the tile preview mode
+            show_grid, show_previews, with_gaps = (
+                self._vp_grid_render_flags(suppress_previews))
 
-            if self.vp_current_grid >= 0:
+            if self.vp_current_grid == -2:
+                grid_indices = []
+            elif self.vp_current_grid >= 0:
                 # show only the selected grid
                 grid_indices = [self.vp_current_grid]
             else:
@@ -2872,7 +3144,8 @@ class Viewport(QWidget):
             # Finally, show imported images
             if self.show_imported:
                 for imported_img_index in range(len(self.imported)):
-                    self._vp_place_imported_img(imported_img_index)
+                    if self._vp_imported_visible(imported_img_index):
+                        self._vp_place_imported_img(imported_img_index)
             # Show stage boundaries (motor range limits)
             self._vp_draw_stage_boundaries()
             if self.show_axes:
@@ -3239,6 +3512,44 @@ class Viewport(QWidget):
                                 width_px * resize_ratio + 1,
                                 height_px * resize_ratio + 1))
 
+    def _vp_place_stub_archive(self, index):
+        imported = self.imported[index]
+        if (not imported.enabled
+                or not imported.is_stub_archive
+                or imported.image is None):
+            return
+        if imported.rotation != 0 or imported.flipped:
+            self._vp_place_imported_img(index)
+            return
+
+        viewport_pixel_size = 1000 / self.cs.vp_scale
+        resize_ratio0 = imported.pixel_size / viewport_pixel_size
+        mag_level = np.clip(int(2 ** -np.round(np.log2(resize_ratio0))), 1, 16)
+        image = imported.pyramid_image(mag=mag_level)
+        if image is None:
+            return
+
+        width_px, height_px = np.array(imported.size) // mag_level
+        centre_dx_dy = self.cs.convert_s_to_d(imported.centre_sx_sy)
+        dx = centre_dx_dy[0] - (imported.size[0] * imported.pixel_size / 1000) / 2
+        dy = centre_dx_dy[1] - (imported.size[1] * imported.pixel_size / 1000) / 2
+        vx, vy = self.cs.convert_d_to_v((dx, dy))
+
+        resize_ratio = resize_ratio0 * mag_level
+        visible, crop_area, vx_cropped, vy_cropped = self._vp_visible_area(
+            vx, vy, width_px, height_px, resize_ratio)
+        if not visible:
+            return
+
+        cropped_img = image.copy(crop_area)
+        v_width = cropped_img.size().width()
+        cropped_resized_img = cropped_img.scaledToWidth(
+            int(v_width * resize_ratio))
+        self.vp_qp.setOpacity(1 - imported.transparency / 100)
+        self.vp_qp.drawPixmap(QPointF(vx_cropped, vy_cropped),
+                              cropped_resized_img)
+        self.vp_qp.setOpacity(1)
+
     def _vp_place_imported_img0(self, index):
         """Place imported image specified by index onto the viewport canvas."""
         imported = self.imported[index]
@@ -3305,6 +3616,14 @@ class Viewport(QWidget):
                                       cropped_resized_img)
                 self.vp_qp.setOpacity(1)
 
+    def _vp_imported_visible(self, index):
+        imported = self.imported[index]
+        if not imported.enabled:
+            return False
+        if imported.is_stub_archive:
+            return self.show_stub_ov
+        return self.show_imported
+
     def _vp_place_overview(self, ov_index,
                            show_debris_area=False, suppress_labels=False):
         """Place OV overview image specified by ov_index onto the viewport
@@ -3314,6 +3633,7 @@ class Viewport(QWidget):
         viewport_pixel_size = 1000 / self.cs.vp_scale
         ov_pixel_size = self.ovm[ov_index].pixel_size
         resize_ratio = ov_pixel_size / viewport_pixel_size
+        accent_rgb = self.acq_groups.overview_accent_colour(ov_index)
         # Load OV centre in SEM coordinates.
         dx, dy = self.ovm[ov_index].centre_dx_dy
         # First, calculate origin of OV image with respect to
@@ -3356,6 +3676,16 @@ class Viewport(QWidget):
                 vx, vy - 4/3 * font_size,
                 width_factor * font_size, 4/3 * font_size)
             self.vp_qp.drawRect(ov_label_rect)
+            if accent_rgb is not None:
+                chip_size = max(6, int(font_size * 0.55))
+                chip_rect = QRectF(
+                    ov_label_rect.right() - chip_size - 3,
+                    ov_label_rect.top() + 2,
+                    chip_size,
+                    chip_size)
+                self.vp_qp.setPen(QColor(*accent_rgb))
+                self.vp_qp.setBrush(QColor(*accent_rgb))
+                self.vp_qp.drawRect(chip_rect)
             self.vp_qp.setPen(QColor(255, 255, 255))
             font = QFont()
             font.setPixelSize(font_size)
@@ -3396,6 +3726,15 @@ class Viewport(QWidget):
         self.vp_qp.drawRect(QRectF(vx, vy,
                             width_px * resize_ratio,
                             height_px * resize_ratio))
+        if accent_rgb is not None:
+            accent_pen = QPen(QColor(*accent_rgb), max(2, pen_width + 1), Qt.SolidLine)
+            self.vp_qp.setPen(accent_pen)
+            self.vp_qp.drawLine(
+                QPointF(vx + 2, vy + 2),
+                QPointF(vx + min(18, width_px * resize_ratio * 0.18), vy + 2))
+            self.vp_qp.drawLine(
+                QPointF(vx + 2, vy + 2),
+                QPointF(vx + 2, vy + min(18, height_px * resize_ratio * 0.18)))
 
         if show_debris_area and self.ovm[ov_index].active:
             # w3, w4 are fudge factors for clearer display
@@ -3533,7 +3872,9 @@ class Viewport(QWidget):
         use_rotation = (theta != 0)
 
         font = QFont()
-        grid_colour_rgb = grid.display_colour_rgb()
+        effective_display_colour = (
+            self.acq_groups.effective_grid_display_colour(grid_index))
+        grid_colour_rgb = self.acq_groups.effective_grid_colour_rgb(grid_index)
         if len(grid_colour_rgb) < 4:
             grid_colour_rgba = grid_colour_rgb + [255]
         else:
@@ -3601,7 +3942,7 @@ class Viewport(QWidget):
                                     int(width_factor * fontsize),
                                     int(4/3 * fontsize))
             self.vp_qp.drawRect(grid_label_rect)
-            if grid.display_colour in [1, 2, 3]:
+            if effective_display_colour in [1, 2, 3]:
             # Use black for light and white for dark background colour
                 self.vp_qp.setPen(QColor(0, 0, 0))
             else:
@@ -3620,13 +3961,27 @@ class Viewport(QWidget):
         # Deferred polygon ROIs draw only the polygon overlay and skip
         # full tile materialization in the viewport.
         if grid.is_deferred_polygon_roi():
-            self._vp_draw_polygon_overlay(grid_index)
+            if show_grid:
+                self._vp_draw_polygon_overlay(grid_index)
             self.vp_qp.resetTransform()
             return
 
-        # If grid is inactive, only the label will be drawn, nothing else.
-        # Reset the QPainter and return in this case
+        # Inactive grids still need a lightweight footprint so they remain
+        # visible when labels are temporarily suppressed during interaction.
         if not grid.active:
+            if show_grid:
+                inactive_pen_width = 2 if grid_index == self.selected_grid else 1
+                inactive_pen = QPen(
+                    grid_colour, inactive_pen_width, Qt.DashLine)
+                inactive_fill = QColor(grid_colour)
+                inactive_fill.setAlpha(25)
+                self.vp_qp.setPen(inactive_pen)
+                self.vp_qp.setBrush(inactive_fill)
+                self.vp_qp.drawRect(QRectF(
+                    0, 0,
+                    width_px * resize_ratio,
+                    height_px * resize_ratio))
+                self._vp_draw_polygon_overlay(grid_index)
             self.vp_qp.resetTransform()
             return
 
@@ -3786,12 +4141,14 @@ class Viewport(QWidget):
         else:
             # Show the grid as a single pixel (for performance reasons when
             # zoomed out).
-            self.vp_qp.setPen(grid_pen)
-            self.vp_qp.drawPoint(int(tile_map[0][0] * resize_ratio),
-                                 int(tile_map[0][1] * resize_ratio))
+            if show_grid:
+                self.vp_qp.setPen(grid_pen)
+                self.vp_qp.drawPoint(int(tile_map[0][0] * resize_ratio),
+                                     int(tile_map[0][1] * resize_ratio))
 
         # Reset painter (undo translation and rotation).
-        self._vp_draw_polygon_overlay(grid_index)
+        if show_grid:
+            self._vp_draw_polygon_overlay(grid_index)
         self.vp_qp.resetTransform()
 
         # ---- Autofocus points in Array mode ---- #
@@ -4328,29 +4685,30 @@ class Viewport(QWidget):
     def _vp_imported_img_mouse_selection(self, px, py):
         """Return the index of the imported image at the position in the
         viewport where user has clicked."""
-        if self.show_imported:
-            for i in reversed(range(len(self.imported))):
-                # Calculate origin of the image with respect to the viewport.
-                # Use width and heigh of the QPixmap (may be rotated
-                # and therefore larger than original image).
-                if self.imported[i].image is not None:
-                    dx, dy = self.cs.convert_s_to_d(
-                        self.imported[i].centre_sx_sy)
-                    pixel_size = self.imported[i].pixel_size
-                    width_d = (self.imported[i].image.size().width()
-                               * pixel_size / 1000)
-                    height_d = (self.imported[i].image.size().height()
-                                * pixel_size / 1000)
-                    dx -= width_d / 2
-                    dy -= height_d / 2
-                    pixel_offset_x, pixel_offset_y = self.cs.convert_d_to_v(
-                        (dx, dy))
-                    p_width = width_d * self.cs.vp_scale
-                    p_height = height_d * self.cs.vp_scale
-                    x, y = px - pixel_offset_x, py - pixel_offset_y
-                    if x >= 0 and y >= 0:
-                        if x < p_width and y < p_height:
-                            return i
+        for i in reversed(range(len(self.imported))):
+            if not self._vp_imported_visible(i):
+                continue
+            # Calculate origin of the image with respect to the viewport.
+            # Use width and height of the QPixmap (may be rotated and
+            # therefore larger than original image).
+            if self.imported[i].image is not None:
+                dx, dy = self.cs.convert_s_to_d(
+                    self.imported[i].centre_sx_sy)
+                pixel_size = self.imported[i].pixel_size
+                width_d = (self.imported[i].image.size().width()
+                           * pixel_size / 1000)
+                height_d = (self.imported[i].image.size().height()
+                            * pixel_size / 1000)
+                dx -= width_d / 2
+                dy -= height_d / 2
+                pixel_offset_x, pixel_offset_y = self.cs.convert_d_to_v(
+                    (dx, dy))
+                p_width = width_d * self.cs.vp_scale
+                p_height = height_d * self.cs.vp_scale
+                x, y = px - pixel_offset_x, py - pixel_offset_y
+                if x >= 0 and y >= 0:
+                    if x < p_width and y < p_height:
+                        return i
         return None
 
     def _vp_template_mouse_selection(self, px, py):
@@ -4617,48 +4975,102 @@ class Viewport(QWidget):
         self.restrict_gui(False)
         self.main_controls_trigger.transmit('STATUS IDLE')
         self._refresh_ov_queue()
+        self._refresh_acquisition_manager()
 
     def _vp_open_stub_overview_dlg(self):
         centre_sx_sy = self.stub_ov_centre
         if centre_sx_sy[0] is None:
             # Use the last known position
             centre_sx_sy = self.ovm['stub'].centre_sx_sy
-        dialog = StubOVDlg(centre_sx_sy,
-                           self.sem, self.stage, self.ovm, self.acq,
-                           self.img_inspector,
-                           self.viewport_trigger)
-        dialog.exec()
+        if self.stub_ov_dialog is not None and self.stub_ov_dialog.isVisible():
+            self.stub_ov_dialog.raise_()
+            self.stub_ov_dialog.activateWindow()
+            return
+        self.stub_ov_dialog = StubOVDlg(
+            centre_sx_sy,
+            self.sem,
+            self.stage,
+            self.ovm,
+            self.imported,
+            self.acq,
+            self.img_inspector,
+            self.viewport_trigger,
+            self.imaging_condition_store)
+        self.stub_ov_dialog.destroyed.connect(
+            lambda *_: setattr(self, 'stub_ov_dialog', None))
+        self.stub_ov_dialog.show()
+        self.stub_ov_dialog.raise_()
+        self.stub_ov_dialog.activateWindow()
 
-    def _vp_stub_overview_acq_success(self, success):
-        if success:
+    def _vp_archive_previous_stub(self, previous_state):
+        if previous_state is None:
+            return
+        previous_path = previous_state.get('vp_file_path', '')
+        if not previous_path or not os.path.isfile(previous_path):
+            return
+        source_kind = previous_state.get('source_kind', 'imported')
+        if stub_workflow.has_matching_stub_archive(
+                self.imported, previous_path, source_kind):
+            return
+        centre_sx_sy = previous_state.get('centre_sx_sy')
+        if centre_sx_sy is None:
+            return
+        image_size_px = previous_state.get('image_size_px')
+        pixel_size = previous_state.get('pixel_size')
+        if image_size_px is None or pixel_size is None:
+            return
+        self.imported.add_image(
+            previous_path,
+            stub_workflow.stub_archive_description(previous_path, source_kind),
+            centre_sx_sy,
+            0,
+            False,
+            image_size_px,
+            pixel_size,
+            True,
+            0,
+            False,
+            source_kind)
+
+    def _vp_finish_stub_overview(self, outcome, mode_key=None,
+                                 previous_state=None):
+        self.acq.acq_in_progress = False
+        self.acq.acq_run_mode = None
+        self.restrict_gui(False)
+        self.main_controls_trigger.transmit('UNRESTRICT GUI')
+        if outcome == 'success':
             self._add_to_main_log(
                 'CTRL: Acquisition of stub overview image completed.')
-            # Load and show new OV images:
+            self._vp_archive_previous_stub(previous_state)
             self.vp_show_new_stub_overview()
-            # Reset user-selected stub_ov_centre
             self.stub_ov_centre = [None, None]
-            # Copy to mirror drive
-            if self.acq.use_mirror_drive:
-                mirror_path = os.path.join(
-                    self.acq.mirror_drive,
-                    self.acq.base_dir[2:], 'overviews', 'stub')
-                if not os.path.exists(mirror_path):
+            if self.acq.use_mirror_drive and mode_key in ('stub', 'stub_lm'):
+                stub_path = self.ovm[mode_key].vp_file_path
+                if stub_path:
+                    mirror_path = os.path.join(
+                        self.acq.mirror_drive,
+                        self.acq.base_dir[2:], 'overviews', 'stub')
+                    if not os.path.exists(mirror_path):
+                        try:
+                            os.makedirs(mirror_path)
+                        except Exception as e:
+                            self._add_to_main_log(
+                                'CTRL: Creating directory on mirror drive failed: '
+                                + str(e))
                     try:
-                        os.makedirs(mirror_path)
+                        shutil.copy(stub_path, mirror_path)
                     except Exception as e:
                         self._add_to_main_log(
-                            'CTRL: Creating directory on mirror drive failed: '
-                            + str(e))
-                try:
-                    shutil.copy(self.ovm['stub'].vp_file_path, mirror_path)
-                except Exception as e:
-                    self._add_to_main_log(
-                        'CTRL: Copying stub overview image to mirror drive '
-                        'failed: ' + str(e))
-        else:
-            self._add_to_main_log('CTRL: ERROR ocurred during stub overview '
-                                  'acquisition.')
+                            'CTRL: Copying stub overview image to mirror drive '
+                            'failed: ' + str(e))
+        elif outcome == 'failure':
+            self._add_to_main_log(
+                'CTRL: ERROR ocurred during stub overview acquisition.')
+        elif outcome == 'aborted':
+            self._add_to_main_log(
+                'CTRL: Stub overview acquisition aborted by user.')
         self.main_controls_trigger.transmit('STATUS IDLE')
+        self.vp_draw()
 
     def _vp_open_change_grid_rotation_dlg(self):
         if self.selected_template:

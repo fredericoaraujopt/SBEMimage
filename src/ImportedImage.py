@@ -25,7 +25,8 @@ from utils import round_xy, image_to_QPixmap
 
 class ImportedImage:
     def __init__(self, image_src, description, centre_sx_sy, rotation, flipped,
-                 size, pixel_size, enabled, transparency, is_array=False):
+                 size, pixel_size, enabled, transparency, is_array=False,
+                 source_kind='imported'):
         self.image_src = image_src   # Path to image file
         self.description = description
         self.centre_sx_sy = centre_sx_sy
@@ -37,12 +38,15 @@ class ImportedImage:
         self.enabled = enabled
         self.transparency = transparency
         self.is_array = is_array
+        self.source_kind = source_kind
+        self.pixmaps_ = {1: None, 2: None, 4: None, 8: None, 16: None}
         self.load_image()
 
     def load_image(self):
         # Load image as QPixmap
         self.source_image = None
         self.image = None
+        self.pixmaps_ = {1: None, 2: None, 4: None, 8: None, 16: None}
         if os.path.isfile(self.image_src):
             try:
                 metadata = imread_metadata(self.image_src)
@@ -53,15 +57,32 @@ class ImportedImage:
                 if isinstance(position[0], (list, tuple)):
                     position = position[0]
                 self.origin = position
-                image = imread(self.image_src)
-                height, width = image.shape[:2]
-                self.size = [width, height]
-                self.source_image = image_to_QPixmap(image)
+                if self.is_stub_archive:
+                    self._load_stub_archive_pyramid()
+                else:
+                    image = imread(self.image_src)
+                    height, width = image.shape[:2]
+                    self.size = [width, height]
+                    self.source_image = image_to_QPixmap(image)
                 self.update_image()
             except:
                 pass
 
+    def _load_stub_archive_pyramid(self):
+        for level, mag in enumerate([1, 2, 4, 8, 16]):
+            image = imread(self.image_src, level=level)
+            if image is None:
+                continue
+            if mag == 1:
+                height, width = image.shape[:2]
+                self.size = [width, height]
+            self.pixmaps_[mag] = image_to_QPixmap(image)
+        self.source_image = self.pixmaps_[1]
+
     def update_image(self):
+        if self.source_image is None:
+            self.image = None
+            return
         if self.rotation != 0 or self.flipped:
             transform = QTransform()
             transform.rotate(self.rotation)
@@ -70,6 +91,11 @@ class ImportedImage:
             self.image = self.source_image.transformed(transform)
         else:
             self.image = self.source_image
+
+    def pyramid_image(self, mag=1):
+        if mag in self.pixmaps_ and self.pixmaps_[mag] is not None:
+            return self.pixmaps_[mag]
+        return self.image
 
     @property
     def centre_sx_sy(self):
@@ -82,7 +108,11 @@ class ImportedImage:
     @property
     def scale(self):
         return self.pixel_size / self.image_pixel_size
-        
+
+    @property
+    def is_stub_archive(self):
+        return self.source_kind in ('stub_archive_sem', 'stub_archive_lm')
+
 
 class ImportedImages(list):
 
@@ -116,6 +146,10 @@ class ImportedImages(list):
         enabled = json.loads(imported['enabled'])
         transparency = json.loads(imported['transparency'])
         is_array = json.loads(imported['is_array'])
+        if 'source_kind' in imported:
+            source_kind = json.loads(imported['source_kind'])
+        else:
+            source_kind = []
 
         # For backward compatibility
         while len(flipped) < number_imported:
@@ -124,10 +158,13 @@ class ImportedImages(list):
             enabled.append(True)
         while len(is_array) < number_imported:
             is_array.append(False)
+        while len(source_kind) < number_imported:
+            source_kind.append('imported')
 
         for i in range(number_imported):
             self.add_image(image_src[i], description[i], centre_sx_sy[i], rotation[i], flipped[i],
-                           size[i], pixel_size[i], enabled[i], transparency[i], is_array[i])
+                           size[i], pixel_size[i], enabled[i], transparency[i],
+                           is_array[i], source_kind[i])
 
     @property
     def number_imported(self):
@@ -157,11 +194,15 @@ class ImportedImages(list):
             [img.transparency for img in self])
         imported['is_array'] = json.dumps(
             [image.is_array for image in self])
+        imported['source_kind'] = json.dumps(
+            [image.source_kind for image in self])
 
     def add_image(self, image_src, description, centre_sx_sy, rotation, flipped,
-                  size, pixel_size, enabled, transparency, is_array=False):
+                  size, pixel_size, enabled, transparency, is_array=False,
+                  source_kind='imported'):
         new_imported_image = ImportedImage(image_src, description, centre_sx_sy, rotation, flipped,
-                                           size, pixel_size, enabled, transparency, is_array)
+                                           size, pixel_size, enabled, transparency,
+                                           is_array, source_kind)
         self.append(new_imported_image)
         return new_imported_image
 

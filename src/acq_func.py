@@ -405,8 +405,9 @@ def acquire_stub_ov(sem, stage, stub_ovm, acq, img_inspector,
             stub_dlg_trigger.transmit(
                 'UPDATE PROGRESS', percentage_done)
 
-        # Write final full stub overview image and downsampled copies to disk unless acq aborted
-        if not aborted:
+        # Write final full stub overview image and downsampled copies to disk
+        # only if the acquisition completed successfully.
+        if success and not aborted:
             stub_dir = os.path.join(acq.base_dir, 'overviews', 'stub')
             if not os.path.exists(stub_dir):
                 os.makedirs(stub_dir)

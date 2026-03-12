@@ -22,8 +22,8 @@ from configparser import ConfigParser
 # The following constants must be updated if entries are added to or
 # deleted from the default configuration files
 CFG_TEMPLATE_FILE = 'src/default_cfg/default.ini'    # Template of session configuration
-CFG_NUMBER_SECTIONS = 12
-CFG_NUMBER_KEYS = 277
+CFG_NUMBER_SECTIONS = 13
+CFG_NUMBER_KEYS = 282
 
 SYSCFG_TEMPLATE_FILE = 'src/default_cfg/system.cfg'  # Template of system configuration
 SYSCFG_NUMBER_SECTIONS = 8

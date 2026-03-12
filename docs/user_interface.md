@@ -58,6 +58,32 @@ an overview image (“OV 0”) and two tile grids (“GRID 0” and “GRID 1”
 The highlighted tiles have been selected for imaging. A low-resolution
 stub overview mosaic is displayed in the background.
 
+The grid settings dialog, overview settings dialog, and stub overview
+acquisition dialog can also reuse shared saved imaging conditions for
+frame size, pixel size / magnification, and dwell time. These presets
+are available through `Apply saved settings` next to `Get current
+settings from SEM`, can be stored with `Save current settings as...`,
+and are shared globally for the local SBEMimage installation in
+`cfg/imaging_conditions/`.
+
+The Viewport controls panel now also includes an `Acquisition manager`
+button below the grid selector. This opens a modeless dialog that shows
+all current groups, overviews, and grids in one tree so operators can
+organize a stack into visual sections without changing the underlying
+acquisition order. Overviews remain blue in the workspace, while grouped
+overviews show a small group-colour accent and grouped grids inherit the
+group colour in the Viewport and selector icons.
+
+Inside the acquisition manager, operators can drag overviews and grids
+between groups or back to `Ungrouped`, toggle whether items are active,
+inspect status and acquisition metadata, lock or unlock items, clear
+overview images or grid previews, and open the existing settings dialogs
+for detailed edits. Grid inspectors also include a compact tile
+activation map so individual tiles can be enabled or disabled in one
+place. The dialog is primarily a UI control surface: stack acquisition
+still runs overviews first, then grids, then the cut cycle between
+slices, using the current active states exactly as before.
+
 ![Viewport window](images/viewport.jpg)
 
 The basic elements described above are displayed in different layers
@@ -72,6 +98,9 @@ are shown in the foreground. You can choose whether to show or hide
 elements by using the controls at the bottom of the window. The visual
 scene can be panned by left-click dragging, and zoomed in and out with
 the mouse wheel or the zoom slider in the bottom-right corner. The
+viewport may temporarily substitute lightweight grid outlines for tile
+previews during panning or drag interactions so grids remain visible
+without re-rendering full previews on every mouse move. The
 viewport is fully functional even while an acquisition is running.
 
 Select the second and third tab to use the slice-by-slice viewer and to
@@ -112,6 +141,7 @@ mark.
 | `ctrl + left click drag`       | Move overview image to new position                                                                                                           |
 | `ctrl + alt + left click drag` | Move imported image to new position                                                                                                           |
 | `mouse wheel ↑/↓`              | Zoom in and out (in vieweport panel); Forward and backward through image series (in slice-by-slice panel)                                     |
+| `H`                            | Toggle grid lines between shown and hidden                                                                                                    |
 | `Measuring tool`               | Activate by clicking on measure button (ruler icon), then right-click on two different points between which you wish to measure the distance. |
 
 ### Slice-by-Slice Viewer

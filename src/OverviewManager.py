@@ -262,8 +262,8 @@ class OverviewManager:
             self.__stub_overview.frame_size_selector)
         self.cfg['overviews']['stub_ov_pixel_size'] = str(
             self.__stub_overview.pixel_size)
-        self.cfg['overviews']['stub_ov_dwell_time'] = str(
-            self.__stub_overview.dwell_time)
+        self.cfg['overviews']['stub_ov_dwell_time_selector'] = str(
+            self.__stub_overview.dwell_time_selector)
         self.cfg['overviews']['stub_ov_viewport_image'] = str(
             self.__stub_overview.vp_file_path)
         # Stub OV LM
@@ -277,8 +277,8 @@ class OverviewManager:
             self.__stub_overview_lm.frame_size_selector)
         self.cfg['overviews']['stub_ov_lm_pixel_size'] = str(
             self.__stub_overview_lm.pixel_size)
-        self.cfg['overviews']['stub_ov_lm_dwell_time'] = str(
-            self.__stub_overview_lm.dwell_time)
+        self.cfg['overviews']['stub_ov_lm_dwell_time_selector'] = str(
+            self.__stub_overview_lm.dwell_time_selector)
         self.cfg['overviews']['stub_ov_lm_viewport_image'] = str(
             self.__stub_overview_lm.vp_file_path)
 

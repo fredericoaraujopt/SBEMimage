@@ -11,22 +11,8 @@ QWidget {
     font-family: "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif;
 }
 
-/* Slightly smaller typography in Main Controls panels to avoid clipping. */
-QWidget#mainControls QGroupBox QLabel,
-QWidget#mainControls QGroupBox QCheckBox,
-QWidget#mainControls QGroupBox QRadioButton,
-QWidget#mainControls QGroupBox QPushButton,
-QWidget#mainControls QGroupBox QToolButton,
-QWidget#mainControls QGroupBox QLineEdit,
-QWidget#mainControls QGroupBox QComboBox,
-QWidget#mainControls QGroupBox QSpinBox,
-QWidget#mainControls QGroupBox QDoubleSpinBox,
-QWidget#mainControls QGroupBox QDateTimeEdit {
-    font-size: 10.5px;
-}
-
+/* Keep KLAB text readable; prefer width/spacing adjustments over font shrinking. */
 QWidget#mainControls QGroupBox::title {
-    font-size: 10.5px;
     font-weight: 600;
 }
 
@@ -372,9 +358,9 @@ QHeaderView::section {
     padding: 1px 4px;
 }
 
-/* Compact-on-demand variants used by the KLAB polisher for fixed geometries. */
+/* Compact-on-demand variants used by the KLAB polisher for fixed geometries.
+   These only tighten spacing; they do not reduce font size. */
 QGroupBox[klabCompact="true"]::title {
-    font-size: 10px;
     left: 7px;
     padding: 0 1px;
 }
@@ -390,7 +376,6 @@ QDoubleSpinBox[klabCompact="true"],
 QDateTimeEdit[klabCompact="true"],
 QLineEdit[klabCompact="true"],
 QTabBar[klabCompact="true"] {
-    font-size: 10px;
 }
 
 QPushButton[klabCompact="true"] {
