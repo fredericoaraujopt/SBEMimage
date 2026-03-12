@@ -190,10 +190,11 @@ These files should be treated as the primary conflict-review surface when integr
 - [x] Record a written integration plan before attempting any merge.
 - [x] Create a checkpoint notebook entry for today's repository state.
 - [x] Create a checkpoint commit that accompanies this notebook entry and preserves the pre-merge local tree.
-- [ ] Create a dedicated integration branch from the checkpoint commit before merging `upstream/dev`.
-- [ ] Review upstream `dev` commits in topical batches and annotate expected conflict points.
-- [ ] Merge `upstream/dev` on the integration branch only after the pre-merge review is complete.
-- [ ] Run targeted automated and manual validation before accepting the integration branch.
+- [x] Create a dedicated integration branch from the checkpoint commit before merging `upstream/dev`.
+- [x] Review upstream `dev` commits in topical batches and annotate expected conflict points.
+- [x] Merge `upstream/dev` on the integration branch only after the pre-merge review is complete.
+- [x] Run targeted automated validation before accepting the integration branch.
+- [ ] Run focused manual smoke validation before accepting the integration branch.
 
 ## Session Change Log (2026-03-12)
 
@@ -208,27 +209,35 @@ Use this section to record work completed today.
 - [x] Confirmed that the local customization work proper starts after `f729367` and currently consists of the committed local chain plus additional uncommitted work in the tree.
 - [x] Identified the highest-risk overlapping files shared by the local line and `upstream/dev`.
 - [x] Recorded a sequential merge-preparation plan that keeps the current feature branch protected and uses a dedicated integration branch for the actual merge attempt.
+- [x] Created local backup branch `backup/feature-guideline-compliance-2026-03-12` from checkpoint `416242b`.
+- [x] Created integration branch `integrate/upstream-dev-2026-03-12` from checkpoint `416242b`.
+- [x] Merged `upstream/dev` into the integration branch and reduced the direct conflict set to four files: `src/Acquisition.py`, `src/Viewport.py`, `src/config_template.py`, and `src/constants.py`.
+- [x] Resolved the merge by keeping the local async viewport grid-acquisition flow and guardrail/provenance logic while incorporating upstream AFSS support and the path-based config-template handling.
+- [x] Recomputed `CFG_NUMBER_KEYS` against the merged `src/default_cfg/default.ini` and updated it to `295` so config validation matches the post-merge template.
+- [x] Verification pass completed: `python -m compileall src tests`.
+- [x] Verification pass completed: `$env:PYTHONPATH='src;tests'; pytest tests/test_load_config.py tests/test_grid_manager.py tests/test_overview_manager.py tests/test_utils.py tests/test_sem.py tests/test_acquisition_group_manager.py tests/test_imaging_conditions.py -q` with `23 passed`.
+- [x] Attempted `pytest tests/test_gui.py -q` as an additional UI smoke gate; it is currently blocked in this environment because the `qtbot` fixture is unavailable, indicating `pytest-qt` is not installed here.
 
 ## Verification Guide - Upstream Dev Integration Preparation
 
 Use this checklist before starting the actual `upstream/dev` merge.
 
-1. [ ] Confirm the checkpoint commit exists on `feature/guideline-compliance`.
-2. [ ] Create a backup branch or tag from the checkpoint commit.
-3. [ ] Create `integrate/upstream-dev-2026-03-12` from the checkpoint commit.
-4. [ ] Review `git log --reverse --oneline 2601d52..upstream/dev` and group commits into AFSS, metadata/OME, and schema/device batches.
-5. [ ] Review the hotspot files listed above and note expected local-vs-upstream conflict intent for each file.
-6. [ ] Merge `upstream/dev` into the integration branch.
-7. [ ] Resolve config and constants conflicts before UI files so the runtime schema is consistent early.
-8. [ ] Run targeted tests and compile/import checks.
+1. [x] Confirm the checkpoint commit exists on `feature/guideline-compliance`.
+2. [x] Create a backup branch or tag from the checkpoint commit.
+3. [x] Create `integrate/upstream-dev-2026-03-12` from the checkpoint commit.
+4. [x] Review `git log --reverse --oneline 2601d52..upstream/dev` and group commits into AFSS, metadata/OME, and schema/device batches.
+5. [x] Review the hotspot files listed above and note expected local-vs-upstream conflict intent for each file.
+6. [x] Merge `upstream/dev` into the integration branch.
+7. [x] Resolve config and constants conflicts before UI files so the runtime schema is consistent early.
+8. [x] Run targeted tests and compile/import checks.
 9. [ ] Launch SBEMimage and complete focused manual smoke tests on the changed workflows.
 10. [ ] Merge the validated integration branch back into `feature/guideline-compliance` only if the result is stable.
 
 Expected result:
 
-- [ ] The repository has a reversible checkpoint before any upstream merge work.
-- [ ] The eventual `upstream/dev` merge happens on an isolated branch.
-- [ ] Conflict resolution decisions are made deliberately per hotspot file instead of ad hoc during the merge.
+- [x] The repository has a reversible checkpoint before any upstream merge work.
+- [x] The eventual `upstream/dev` merge happens on an isolated branch.
+- [x] Conflict resolution decisions are made deliberately per hotspot file instead of ad hoc during the merge.
 - [ ] Upstream improvements are integrated without losing the local customization work.
 
 ## New Issues Found Today

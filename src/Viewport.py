@@ -2985,6 +2985,7 @@ class Viewport(QWidget):
             self.acq.init_acquisition()
             self.acq.set_up_acq_subdirectories()
             self.acq.set_up_acq_logs()
+            self.acq.set_up_afss_masks()
             if self.acq.error_state == constants.Error.none:
                 self.acq.acquire_grid(grid_index, overwrite=True)
 
@@ -4095,7 +4096,7 @@ class Viewport(QWidget):
                     show_autofocus_label = (
                         grid[tile_index].autofocus_active
                         and self.acq.use_autofocus
-                        and (self.autofocus.method < 2 or self.autofocus.method == 3))
+                        and self.autofocus.method in (0, 1, 3, 4))
                     show_tracking_label = (
                         grid[tile_index].autofocus_active
                         and self.acq.use_autofocus
