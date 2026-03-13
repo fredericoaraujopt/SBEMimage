@@ -618,7 +618,7 @@ class GridManager(list):
         self.add_new_grid(
             origin_sx_sy=layout['origin_sx_sy'],
             sw_sh=(w, h),
-            active=grid.active,
+            active=True,
             frame_size=grid.frame_size,
             frame_size_selector=grid.frame_size_selector,
             overlap=grid.overlap,

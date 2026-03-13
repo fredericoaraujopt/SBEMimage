@@ -116,6 +116,7 @@ class Viewport(QWidget):
         self.vp_polygon_handle_drag = None
         self.vp_polygon_vertex_drag = None
         self.vp_polygon_clipboard = None
+        self.vp_overview_clipboard = None
         self.vp_polygon_context_dx_dy = None
 
         self._load_gui()
@@ -882,6 +883,20 @@ class Viewport(QWidget):
     def _add_to_main_log(self, msg):
         """Add entry to the log in the main window via main_controls_trigger."""
         self.main_controls_trigger.transmit(utils.format_log_entry(msg))
+
+    def _vp_selection_padding_px(self):
+        return max(8, min(20, int(round(8 + self.cs.vp_scale * 2))))
+
+    @staticmethod
+    def _vp_point_near_rect_border(x, y, width, height, padding):
+        if not (-padding <= x <= width + padding
+                and -padding <= y <= height + padding):
+            return False
+        return (
+            abs(x) <= padding
+            or abs(y) <= padding
+            or abs(x - width) <= padding
+            or abs(y - height) <= padding)
 
     def closeEvent(self, event):
         """This overrides the QWidget's closeEvent(). Viewport must be
@@ -2026,6 +2041,51 @@ class Viewport(QWidget):
     def _vp_copy_selected_polygon(self):
         self._vp_copy_selected_grid()
 
+    def _vp_copy_selected_ov(self):
+        if self.selected_ov is None:
+            return
+        ov = self.ovm[self.selected_ov]
+        self.vp_overview_clipboard = {
+            'active': ov.active,
+            'frame_size': list(ov.frame_size),
+            'frame_size_selector': ov.frame_size_selector,
+            'pixel_size': ov.pixel_size,
+            'dwell_time': ov.dwell_time,
+            'dwell_time_selector': ov.dwell_time_selector,
+            'bit_depth_selector': ov.bit_depth_selector,
+            'acq_interval': ov.acq_interval,
+            'acq_interval_offset': ov.acq_interval_offset,
+        }
+
+    def _vp_paste_ov_at(self, centre_dx_dy):
+        if self.vp_overview_clipboard is None:
+            return
+        clip = self.vp_overview_clipboard
+        self.ovm.add_new_overview(
+            ov_active=clip['active'],
+            centre_sx_sy=self.cs.convert_d_to_s(centre_dx_dy),
+            frame_size=clip['frame_size'],
+            frame_size_selector=clip['frame_size_selector'],
+            pixel_size=clip['pixel_size'],
+            dwell_time=clip['dwell_time'],
+            dwell_time_selector=clip['dwell_time_selector'],
+            bit_depth_selector=clip['bit_depth_selector'],
+            acq_interval=clip['acq_interval'],
+            acq_interval_offset=clip['acq_interval_offset'])
+        self.selected_ov = self.ovm.number_ov - 1
+        self.main_controls_trigger.transmit('OV SETTINGS CHANGED')
+        self.vp_draw()
+
+    def _vp_duplicate_selected_ov(self):
+        if self.selected_ov is None:
+            return
+        self._vp_copy_selected_ov()
+        ov = self.ovm[self.selected_ov]
+        offset_dx_dy = (
+            ov.centre_dx_dy[0] + max(5.0, ov.width_d() * 0.15),
+            ov.centre_dx_dy[1] + max(5.0, ov.height_d() * 0.15))
+        self._vp_paste_ov_at(offset_dx_dy)
+
     def _vp_paste_grid_at(self, centre_dx_dy):
         if self.vp_polygon_clipboard is None:
             return
@@ -2689,6 +2749,30 @@ class Viewport(QWidget):
             action_pasteGrid.triggered.connect(
                 lambda: self._vp_paste_grid_at(self.vp_polygon_context_dx_dy))
             action_pasteGrid.setEnabled(self.vp_polygon_clipboard is not None)
+
+            if self.selected_ov is not None:
+                action_copyOV = menu.addAction(
+                    f'Copy OV {self.selected_ov}')
+                action_copyOV.triggered.connect(self._vp_copy_selected_ov)
+                action_duplicateOV = menu.addAction(
+                    f'Duplicate OV {self.selected_ov}')
+                action_duplicateOV.triggered.connect(
+                    self._vp_duplicate_selected_ov)
+                action_deleteOV = menu.addAction(
+                    f'Delete OV {self.selected_ov}')
+                action_deleteOV.triggered.connect(
+                    lambda _, ov_index=self.selected_ov:
+                        self.vp_delete_overview(ov_index))
+                if self.selected_ov == 0 or self.selected_ov != self.ovm.number_ov - 1:
+                    action_deleteOV.setEnabled(False)
+            else:
+                action_copyOV = None
+                action_duplicateOV = None
+                action_deleteOV = None
+            action_pasteOV = menu.addAction('Paste copied OV here')
+            action_pasteOV.triggered.connect(
+                lambda: self._vp_paste_ov_at(self.vp_polygon_context_dx_dy))
+            action_pasteOV.setEnabled(self.vp_overview_clipboard is not None)
 
             if self.gm.array_mode:
                 action_moveGridCurrentStage = menu.addAction(
@@ -4561,6 +4645,9 @@ class Viewport(QWidget):
             # Row shift in viewport pixels
             shift_v = (self.gm[grid_index].row_shift * pixel_size
                        / 1000 * self.cs.vp_scale)
+            grid_width_v = cols * tile_width_v + overlap_v + shift_v
+            grid_height_v = rows * tile_height_v + overlap_v
+            selection_pad = self._vp_selection_padding_px()
             # Mouse click position relative to top-left corner of grid
             x, y = px - grid_topleft_vx, py - grid_topleft_vy
             theta = radians(self.gm[grid_index].rotation)
@@ -4655,12 +4742,21 @@ class Viewport(QWidget):
                     width_factor = 10.5
                 label_width = int(width_factor * f)
                 label_height = int(4/3 * f)
+                label_width += 2 * selection_pad
+                label_height += 2 * selection_pad
                 l_y = y + label_height
                 if x >= 0 and l_y >= 0 and selected_grid is None:
                     if x < label_width and l_y < label_height:
                         selected_grid = grid_index
                         selected_tile = None
                         break
+
+            if (selected_grid is None
+                    and self._vp_point_near_rect_border(
+                        x, y, grid_width_v, grid_height_v, selection_pad)):
+                selected_grid = grid_index
+                selected_tile = None
+                break
 
         return selected_grid, selected_tile
 
@@ -4679,6 +4775,7 @@ class Viewport(QWidget):
                 pixel_offset_x, pixel_offset_y = self.cs.convert_d_to_v((dx, dy))
                 p_width = self.ovm[ov_index].width_d() * self.cs.vp_scale
                 p_height = self.ovm[ov_index].height_d() * self.cs.vp_scale
+                selection_pad = self._vp_selection_padding_px()
                 x, y = px - pixel_offset_x, py - pixel_offset_y
                 # Check if mouse click position is within OV area
                 if x >= 0 and y >= 0:
@@ -4697,11 +4794,18 @@ class Viewport(QWidget):
                     width_factor = 9
                 label_width = int(f * width_factor)
                 label_height = int(4/3 * f)
+                label_width += 2 * selection_pad
+                label_height += 2 * selection_pad
                 l_y = y + label_height
                 if x >= 0 and l_y >= 0 and selected_ov is None:
                     if x < label_width and l_y < label_height:
                         selected_ov = ov_index
                         break
+                if (selected_ov is None
+                        and self._vp_point_near_rect_border(
+                            x, y, p_width, p_height, selection_pad)):
+                    selected_ov = ov_index
+                    break
         elif self.vp_current_ov >= 0:
             selected_ov = self.vp_current_ov
         return selected_ov

@@ -1,18 +1,22 @@
 import os
+import numpy as np
 
 from qtpy.QtCore import QTimer, Qt
-from qtpy.QtGui import QColor, QIcon, QPixmap
+from qtpy.QtGui import QColor, QIcon, QPainter, QPixmap
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QMenu,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -24,6 +28,7 @@ from qtpy.QtWidgets import (
 
 import constants
 import utils
+from dialog.viewport.BatchImagingSettingsDlg import BatchImagingSettingsDlg
 from dialog.viewport.TileActivationMap import TileActivationMap
 
 
@@ -35,6 +40,49 @@ KIND_OVERVIEW = 'overview'
 KIND_GRID = 'grid'
 KIND_BUCKET_OVERVIEW = 'bucket_ov'
 KIND_BUCKET_GRID = 'bucket_grid'
+
+STATUS_ORDER = (
+    ('active', 'Active', QColor(28, 152, 92)),
+    ('locked', 'Locked', QColor(55, 71, 79)),
+    ('acquired', 'Acquired', QColor(40, 118, 200)),
+    ('failed', 'Failed', QColor(198, 40, 40)),
+    ('deferred', 'Deferred', QColor(181, 116, 27)),
+)
+
+NON_FAILURE_RESULTS = {'', 'not_imaged', 'success', 'running', 'cleared'}
+
+VIEW_PRESETS = {
+    'All items': {
+        'filter_active_only': False,
+        'filter_locked_only': False,
+        'filter_failed_only': False,
+        'filter_current_group_only': False,
+    },
+    'Active review': {
+        'filter_active_only': True,
+        'filter_locked_only': False,
+        'filter_failed_only': False,
+        'filter_current_group_only': False,
+    },
+    'Locked review': {
+        'filter_active_only': False,
+        'filter_locked_only': True,
+        'filter_failed_only': False,
+        'filter_current_group_only': False,
+    },
+    'Failure triage': {
+        'filter_active_only': False,
+        'filter_locked_only': False,
+        'filter_failed_only': True,
+        'filter_current_group_only': False,
+    },
+    'Current group focus': {
+        'filter_active_only': False,
+        'filter_locked_only': False,
+        'filter_failed_only': False,
+        'filter_current_group_only': True,
+    },
+}
 
 
 class AcquisitionTreeWidget(QTreeWidget):
@@ -65,8 +113,10 @@ class AcquisitionManagerDlg(QDialog):
 
         self._tree_refreshing = False
         self._inspector_refreshing = False
+        self._filter_refreshing = False
         self._item_index = {}
         self._current_grid_for_tile_map = None
+        self._last_current_group_filter_id = None
 
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setWindowTitle('Acquisition manager')
@@ -96,6 +146,23 @@ class AcquisitionManagerDlg(QDialog):
         toolbar.addWidget(self.button_refresh)
         root.addLayout(toolbar)
 
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel('Workflow preset:'))
+        self.combo_view_preset = QComboBox(self)
+        self.combo_view_preset.addItems(list(VIEW_PRESETS) + ['Custom'])
+        self.checkBox_filterActive = QCheckBox('Show only active', self)
+        self.checkBox_filterLocked = QCheckBox('Only locked', self)
+        self.checkBox_filterFailed = QCheckBox('Only failed', self)
+        self.checkBox_filterCurrentGroup = QCheckBox('Only current group', self)
+        filter_bar.addWidget(self.combo_view_preset)
+        filter_bar.addSpacing(8)
+        filter_bar.addWidget(self.checkBox_filterActive)
+        filter_bar.addWidget(self.checkBox_filterLocked)
+        filter_bar.addWidget(self.checkBox_filterFailed)
+        filter_bar.addWidget(self.checkBox_filterCurrentGroup)
+        filter_bar.addStretch(1)
+        root.addLayout(filter_bar)
+
         splitter = QSplitter(Qt.Horizontal, self)
         root.addWidget(splitter, 1)
 
@@ -104,17 +171,21 @@ class AcquisitionManagerDlg(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
         self.tree = AcquisitionTreeWidget(left_panel)
-        self.tree.setHeaderHidden(True)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderLabels(['Item', 'Status'])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setDragEnabled(True)
         self.tree.setAcceptDrops(True)
         self.tree.setDropIndicatorShown(True)
         self.tree.setDragDropMode(QAbstractItemView.InternalMove)
         self.tree.setDefaultDropAction(Qt.MoveAction)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         left_layout.addWidget(self.tree, 1)
         tree_hint = QLabel(
-            'Drag grids or overviews onto a group to assign them. '
-            'Drop them onto an ungrouped bucket to remove the assignment.')
+            'Use Shift-click or Ctrl-click to select multiple rows. Drag selected grids or overviews onto a group to assign them together. '
+            'Drop them onto an ungrouped bucket to remove the assignment. The status column shows active, locked, acquired, failed, and deferred state.')
         tree_hint.setWordWrap(True)
         left_layout.addWidget(tree_hint)
         splitter.addWidget(left_panel)
@@ -139,12 +210,23 @@ class AcquisitionManagerDlg(QDialog):
         self.button_new_subgroup.clicked.connect(self._create_subgroup)
         self.button_delete_group.clicked.connect(self._delete_selected_group)
         self.button_refresh.clicked.connect(self.refresh_view)
+        self.combo_view_preset.currentTextChanged.connect(
+            self._preset_changed)
+        self.checkBox_filterActive.toggled.connect(self._filter_state_changed)
+        self.checkBox_filterLocked.toggled.connect(self._filter_state_changed)
+        self.checkBox_filterFailed.toggled.connect(self._filter_state_changed)
+        self.checkBox_filterCurrentGroup.toggled.connect(
+            self._filter_state_changed)
         self.tree.itemChanged.connect(self._tree_item_changed)
         self.tree.currentItemChanged.connect(self._tree_current_item_changed)
+        self.tree.itemSelectionChanged.connect(self._tree_selection_changed)
         self.tree.itemExpanded.connect(self._tree_item_expanded)
         self.tree.itemCollapsed.connect(self._tree_item_collapsed)
         self.tree.set_drop_callback(self._tree_reordered)
+        self.tree.customContextMenuRequested.connect(
+            self._open_tree_context_menu)
 
+        self._load_filter_state()
         self.refresh_view()
 
     def _build_placeholder_page(self):
@@ -404,6 +486,9 @@ class AcquisitionManagerDlg(QDialog):
     def _selected_item(self):
         return self.tree.currentItem()
 
+    def _selected_items(self):
+        return self.tree.selectedItems()
+
     def _selected_item_key(self):
         item = self._selected_item()
         if item is None:
@@ -411,6 +496,181 @@ class AcquisitionManagerDlg(QDialog):
         return self._item_key(
             item.data(0, ROLE_KIND),
             item.data(0, ROLE_IDENTIFIER))
+
+    def _selected_kind_identifier_pairs(self):
+        return [
+            (item.data(0, ROLE_KIND), item.data(0, ROLE_IDENTIFIER))
+            for item in self._selected_items()]
+
+    def _selected_indices(self, kind):
+        return [
+            identifier
+            for item_kind, identifier in self._selected_kind_identifier_pairs()
+            if item_kind == kind]
+
+    def _selection_summary(self):
+        summary = {
+            KIND_GROUP: 0,
+            KIND_OVERVIEW: 0,
+            KIND_GRID: 0,
+            KIND_BUCKET_OVERVIEW: 0,
+            KIND_BUCKET_GRID: 0,
+        }
+        for kind, _ in self._selected_kind_identifier_pairs():
+            summary[kind] = summary.get(kind, 0) + 1
+        return summary
+
+    def _filter_state(self):
+        return {
+            'view_preset': self.combo_view_preset.currentText(),
+            'filter_active_only': self.checkBox_filterActive.isChecked(),
+            'filter_locked_only': self.checkBox_filterLocked.isChecked(),
+            'filter_failed_only': self.checkBox_filterFailed.isChecked(),
+            'filter_current_group_only': (
+                self.checkBox_filterCurrentGroup.isChecked()),
+        }
+
+    def _load_filter_state(self):
+        state = self.acq_groups.load_ui_state()
+        self._filter_refreshing = True
+        self.checkBox_filterActive.setChecked(state['filter_active_only'])
+        self.checkBox_filterLocked.setChecked(state['filter_locked_only'])
+        self.checkBox_filterFailed.setChecked(state['filter_failed_only'])
+        self.checkBox_filterCurrentGroup.setChecked(
+            state['filter_current_group_only'])
+        preset_name = state['view_preset']
+        if preset_name not in VIEW_PRESETS and preset_name != 'Custom':
+            preset_name = self._matching_view_preset_name() or 'Custom'
+        self.combo_view_preset.setCurrentText(preset_name)
+        self._filter_refreshing = False
+
+    def _save_filter_state(self):
+        self.acq_groups.save_ui_state(self._filter_state())
+
+    def _matching_view_preset_name(self):
+        current_flags = {
+            'filter_active_only': self.checkBox_filterActive.isChecked(),
+            'filter_locked_only': self.checkBox_filterLocked.isChecked(),
+            'filter_failed_only': self.checkBox_filterFailed.isChecked(),
+            'filter_current_group_only': (
+                self.checkBox_filterCurrentGroup.isChecked()),
+        }
+        for name, flags in VIEW_PRESETS.items():
+            if flags == current_flags:
+                return name
+        return None
+
+    def _filters_active(self):
+        return any([
+            self.checkBox_filterActive.isChecked(),
+            self.checkBox_filterLocked.isChecked(),
+            self.checkBox_filterFailed.isChecked(),
+            self.checkBox_filterCurrentGroup.isChecked(),
+        ])
+
+    def _tree_reorder_enabled(self):
+        return self._is_mutating_enabled() and not self._filters_active()
+
+    def _preset_changed(self, preset_name):
+        if self._filter_refreshing:
+            return
+        if preset_name in VIEW_PRESETS:
+            self._filter_refreshing = True
+            flags = VIEW_PRESETS[preset_name]
+            self.checkBox_filterActive.setChecked(flags['filter_active_only'])
+            self.checkBox_filterLocked.setChecked(flags['filter_locked_only'])
+            self.checkBox_filterFailed.setChecked(flags['filter_failed_only'])
+            self.checkBox_filterCurrentGroup.setChecked(
+                flags['filter_current_group_only'])
+            self._filter_refreshing = False
+        self._save_filter_state()
+        self.refresh_view()
+
+    def _filter_state_changed(self):
+        if self._filter_refreshing:
+            return
+        self._filter_refreshing = True
+        self.combo_view_preset.setCurrentText(
+            self._matching_view_preset_name() or 'Custom')
+        self._filter_refreshing = False
+        self._save_filter_state()
+        self.refresh_view()
+
+    def _current_filter_group_id(self):
+        if not self.checkBox_filterCurrentGroup.isChecked():
+            return None
+        current = self._selected_item()
+        if current is None:
+            return None
+        kind = current.data(0, ROLE_KIND)
+        identifier = current.data(0, ROLE_IDENTIFIER)
+        if kind == KIND_GROUP:
+            return identifier
+        if kind == KIND_OVERVIEW:
+            return self._overview_group_id_cached(identifier)
+        if kind == KIND_GRID:
+            return self._grid_group_id_cached(identifier)
+        return None
+
+    def _overview_group_id_cached(self, ov_index):
+        if 0 <= ov_index < len(self.acq_groups._ov_group_ids):
+            return self.acq_groups._ov_group_ids[ov_index]
+        return None
+
+    def _grid_group_id_cached(self, grid_index):
+        if 0 <= grid_index < len(self.acq_groups._grid_group_ids):
+            return self.acq_groups._grid_group_ids[grid_index]
+        return None
+
+    def _result_failed(self, result_text):
+        return str(result_text or '').strip().lower() not in NON_FAILURE_RESULTS
+
+    def _status_state(self, kind, identifier):
+        if kind == KIND_OVERVIEW:
+            overview = self.ovm[identifier]
+            return {
+                'active': bool(overview.active),
+                'locked': bool(overview.locked),
+                'acquired': bool(overview.acquired),
+                'failed': self._result_failed(overview.last_acquisition_result),
+                'deferred': False,
+            }
+        if kind == KIND_GRID:
+            grid = self.gm[identifier]
+            return {
+                'active': bool(grid.active),
+                'locked': bool(grid.locked),
+                'acquired': bool(grid.acquired),
+                'failed': self._result_failed(grid.last_acquisition_result),
+                'deferred': bool(grid.is_deferred_polygon_roi()),
+            }
+        return {name: False for name, _, _ in STATUS_ORDER}
+
+    def _status_icon(self, status_state):
+        pixmap = QPixmap(86, 14)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        x_pos = 3
+        for name, _, colour in STATUS_ORDER:
+            enabled = bool(status_state.get(name))
+            fill_colour = colour if enabled else QColor(200, 200, 200, 70)
+            pen_colour = colour if enabled else QColor(170, 170, 170, 120)
+            painter.setPen(pen_colour)
+            painter.setBrush(fill_colour)
+            painter.drawEllipse(x_pos, 3, 8, 8)
+            x_pos += 15
+        painter.end()
+        return QIcon(pixmap)
+
+    def _status_tooltip(self, status_state):
+        labels = [
+            label.lower()
+            for name, label, _ in STATUS_ORDER
+            if status_state.get(name)]
+        if not labels:
+            return 'No active status flags.'
+        return ', '.join(labels)
 
     def _register_item(self, item, kind, identifier):
         item.setData(0, ROLE_KIND, kind)
@@ -422,26 +682,82 @@ class AcquisitionManagerDlg(QDialog):
 
     def _bucket_flags(self):
         flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if self._is_mutating_enabled():
+        if self._tree_reorder_enabled():
             flags |= Qt.ItemIsDropEnabled
         return flags
 
     def _group_flags(self):
         flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
         if self._is_mutating_enabled():
-            flags |= (Qt.ItemIsUserCheckable
-                      | Qt.ItemIsDragEnabled
-                      | Qt.ItemIsDropEnabled)
+            flags |= Qt.ItemIsUserCheckable
+        if self._tree_reorder_enabled():
+            flags |= Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled
         return flags
 
     def _leaf_flags(self):
         flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
         if self._is_mutating_enabled():
-            flags |= Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled
+            flags |= Qt.ItemIsUserCheckable
+        if self._tree_reorder_enabled():
+            flags |= Qt.ItemIsDragEnabled
         return flags
 
+    def _item_matches_filters(self, kind, identifier):
+        current_group_id = self._current_filter_group_id()
+        if current_group_id is not None:
+            allowed_group_ids = {
+                current_group_id,
+                *self.acq_groups.descendant_group_ids(current_group_id),
+            }
+            if kind == KIND_OVERVIEW:
+                if self._overview_group_id_cached(identifier) not in allowed_group_ids:
+                    return False
+            elif kind == KIND_GRID:
+                if self._grid_group_id_cached(identifier) not in allowed_group_ids:
+                    return False
+            elif kind == KIND_GROUP and identifier not in allowed_group_ids:
+                return False
+        if kind == KIND_OVERVIEW:
+            overview = self.ovm[identifier]
+            if self.checkBox_filterActive.isChecked() and not overview.active:
+                return False
+            if self.checkBox_filterLocked.isChecked() and not overview.locked:
+                return False
+            if (self.checkBox_filterFailed.isChecked()
+                    and not self._result_failed(overview.last_acquisition_result)):
+                return False
+            return True
+        if kind == KIND_GRID:
+            grid = self.gm[identifier]
+            if self.checkBox_filterActive.isChecked() and not grid.active:
+                return False
+            if self.checkBox_filterLocked.isChecked() and not grid.locked:
+                return False
+            if (self.checkBox_filterFailed.isChecked()
+                    and not self._result_failed(grid.last_acquisition_result)):
+                return False
+            return True
+        return True
+
+    def _group_has_visible_content(self, group_id, visited=None):
+        if visited is None:
+            visited = set()
+        if group_id in visited:
+            return False
+        visited.add(group_id)
+        for ov_index in self._group_direct_overview_indices(group_id):
+            if self._item_matches_filters(KIND_OVERVIEW, ov_index):
+                return True
+        for grid_index in self._group_direct_grid_indices(group_id):
+            if self._item_matches_filters(KIND_GRID, grid_index):
+                return True
+        for child_group_id in self.acq_groups.child_group_ids(group_id):
+            if self._group_has_visible_content(child_group_id, visited):
+                return True
+        return False
+
     def _create_bucket_item(self, kind, title):
-        item = QTreeWidgetItem([title])
+        item = QTreeWidgetItem([title, ''])
         item.setFlags(self._bucket_flags())
         self._register_item(item, kind, kind)
         return item
@@ -449,13 +765,13 @@ class AcquisitionManagerDlg(QDialog):
     def _group_direct_overview_indices(self, group_id):
         return [
             ov_index for ov_index in range(self.ovm.number_ov)
-            if self.acq_groups.overview_group_id(ov_index) == group_id
+            if self._overview_group_id_cached(ov_index) == group_id
         ]
 
     def _group_direct_grid_indices(self, group_id):
         return [
             grid_index for grid_index in range(self.gm.number_grids)
-            if self.acq_groups.grid_group_id(grid_index) == group_id
+            if self._grid_group_id_cached(grid_index) == group_id
         ]
 
     def _group_check_state(self, group_id):
@@ -477,7 +793,7 @@ class AcquisitionManagerDlg(QDialog):
 
     def _create_group_item(self, group_id):
         group = self.acq_groups.group(group_id)
-        item = QTreeWidgetItem([group['name']])
+        item = QTreeWidgetItem([group['name'], ''])
         item.setFlags(self._group_flags())
         item.setCheckState(0, self._group_check_state(group_id))
         item.setIcon(0, self._colour_icon(group['colour']))
@@ -490,15 +806,18 @@ class AcquisitionManagerDlg(QDialog):
         title = f'OV {ov_index}'
         if not overview.active:
             title += ' (inactive)'
-        item = QTreeWidgetItem([title])
+        status_state = self._status_state(KIND_OVERVIEW, ov_index)
+        item = QTreeWidgetItem([title, ''])
         item.setFlags(self._leaf_flags())
         item.setCheckState(0, Qt.Checked if overview.active else Qt.Unchecked)
-        group_id = self.acq_groups.overview_group_id(ov_index)
+        item.setIcon(1, self._status_icon(status_state))
+        group_id = self._overview_group_id_cached(ov_index)
         if group_id is not None:
             group = self.acq_groups.group(group_id)
             if group is not None:
                 item.setIcon(0, self._colour_icon(group['colour']))
         item.setToolTip(0, self.acq_groups.overview_group_path_text(ov_index))
+        item.setToolTip(1, self._status_tooltip(status_state))
         self._register_item(item, KIND_OVERVIEW, ov_index)
         return item
 
@@ -507,35 +826,44 @@ class AcquisitionManagerDlg(QDialog):
         title = grid.get_label(grid_index)
         if not grid.active:
             title += ' (inactive)'
-        item = QTreeWidgetItem([title])
+        status_state = self._status_state(KIND_GRID, grid_index)
+        item = QTreeWidgetItem([title, ''])
         item.setFlags(self._leaf_flags())
         item.setCheckState(0, Qt.Checked if grid.active else Qt.Unchecked)
-        group_id = self.acq_groups.grid_group_id(grid_index)
+        item.setIcon(1, self._status_icon(status_state))
+        group_id = self._grid_group_id_cached(grid_index)
         if group_id is not None:
             group = self.acq_groups.group(group_id)
             if group is not None:
                 item.setIcon(0, self._colour_icon(group['colour']))
         item.setToolTip(0, self.acq_groups.grid_group_path_text(grid_index))
+        item.setToolTip(1, self._status_tooltip(status_state))
         self._register_item(item, KIND_GRID, grid_index)
         return item
 
     def _add_group_branch(self, parent_item, group_id):
+        if not self._group_has_visible_content(group_id):
+            return False
         group_item = self._create_group_item(group_id)
         parent_item.addChild(group_item)
         for child_group_id in self.acq_groups.child_group_ids(group_id):
             self._add_group_branch(group_item, child_group_id)
         for ov_index in self._group_direct_overview_indices(group_id):
-            group_item.addChild(self._create_overview_item(ov_index))
+            if self._item_matches_filters(KIND_OVERVIEW, ov_index):
+                group_item.addChild(self._create_overview_item(ov_index))
         for grid_index in self._group_direct_grid_indices(group_id):
-            group_item.addChild(self._create_grid_item(grid_index))
+            if self._item_matches_filters(KIND_GRID, grid_index):
+                group_item.addChild(self._create_grid_item(grid_index))
         if self.acq_groups.group(group_id)['expanded']:
             self.tree.expandItem(group_item)
+        return True
 
     def refresh_view(self, selected_key=None):
         self.acq_groups.sync_inventory()
         if selected_key is None:
             selected_key = self._selected_item_key()
-        if self._is_mutating_enabled():
+        current_group_id = self._current_filter_group_id()
+        if self._tree_reorder_enabled():
             self.tree.setDragDropMode(QAbstractItemView.InternalMove)
         else:
             self.tree.setDragDropMode(QAbstractItemView.NoDragDrop)
@@ -545,26 +873,39 @@ class AcquisitionManagerDlg(QDialog):
         self.tree.clear()
 
         root = self.tree.invisibleRootItem()
-        for group_id in self.acq_groups.child_group_ids(None):
-            self._add_group_branch(root, group_id)
+        top_level_groups = (
+            [current_group_id]
+            if current_group_id is not None
+            else self.acq_groups.child_group_ids(None))
+        for group_id in top_level_groups:
+            if group_id is not None:
+                self._add_group_branch(root, group_id)
 
-        bucket_ov = self._create_bucket_item(
-            KIND_BUCKET_OVERVIEW, 'Ungrouped overviews')
-        root.addChild(bucket_ov)
-        for ov_index in range(self.ovm.number_ov):
-            if self.acq_groups.overview_group_id(ov_index) is None:
-                bucket_ov.addChild(self._create_overview_item(ov_index))
-        bucket_ov.setExpanded(True)
+        if current_group_id is None:
+            visible_ungrouped_ov = [
+                ov_index for ov_index in range(self.ovm.number_ov)
+                if (self._overview_group_id_cached(ov_index) is None
+                    and self._item_matches_filters(KIND_OVERVIEW, ov_index))]
+            if visible_ungrouped_ov:
+                bucket_ov = self._create_bucket_item(
+                    KIND_BUCKET_OVERVIEW, 'Ungrouped overviews')
+                root.addChild(bucket_ov)
+                for ov_index in visible_ungrouped_ov:
+                    bucket_ov.addChild(self._create_overview_item(ov_index))
+                bucket_ov.setExpanded(True)
 
-        bucket_grid = self._create_bucket_item(
-            KIND_BUCKET_GRID, 'Ungrouped grids')
-        root.addChild(bucket_grid)
-        for grid_index in range(self.gm.number_grids):
-            if self.acq_groups.grid_group_id(grid_index) is None:
-                bucket_grid.addChild(self._create_grid_item(grid_index))
-        bucket_grid.setExpanded(True)
+            visible_ungrouped_grids = [
+                grid_index for grid_index in range(self.gm.number_grids)
+                if (self._grid_group_id_cached(grid_index) is None
+                    and self._item_matches_filters(KIND_GRID, grid_index))]
+            if visible_ungrouped_grids:
+                bucket_grid = self._create_bucket_item(
+                    KIND_BUCKET_GRID, 'Ungrouped grids')
+                root.addChild(bucket_grid)
+                for grid_index in visible_ungrouped_grids:
+                    bucket_grid.addChild(self._create_grid_item(grid_index))
+                bucket_grid.setExpanded(True)
 
-        self._tree_refreshing = False
         if selected_key and selected_key in self._item_index:
             self.tree.setCurrentItem(self._item_index[selected_key])
         elif self.tree.topLevelItemCount() > 0:
@@ -573,6 +914,8 @@ class AcquisitionManagerDlg(QDialog):
             self.tree.setCurrentItem(None)
         self._update_top_level_button_state()
         self._update_inspector()
+        self._last_current_group_filter_id = self._current_filter_group_id()
+        self._tree_refreshing = False
 
     def _tree_item_changed(self, item, column):
         if self._tree_refreshing or column != 0 or not self._is_mutating_enabled():
@@ -601,6 +944,26 @@ class AcquisitionManagerDlg(QDialog):
 
     def _tree_current_item_changed(self, current, previous):
         del current, previous
+        if self._tree_refreshing:
+            return
+        current_group_id = self._current_filter_group_id()
+        if (self.checkBox_filterCurrentGroup.isChecked()
+                and current_group_id != self._last_current_group_filter_id):
+            self._last_current_group_filter_id = current_group_id
+            self.refresh_view()
+            return
+        self._update_top_level_button_state()
+        self._update_inspector()
+
+    def _tree_selection_changed(self):
+        if self._tree_refreshing:
+            return
+        if self.checkBox_filterCurrentGroup.isChecked():
+            current_group_id = self._current_filter_group_id()
+            if current_group_id != self._last_current_group_filter_id:
+                self._last_current_group_filter_id = current_group_id
+                self.refresh_view()
+                return
         self._update_top_level_button_state()
         self._update_inspector()
 
@@ -660,6 +1023,21 @@ class AcquisitionManagerDlg(QDialog):
         self.button_delete_group.setEnabled(enabled and kind == KIND_GROUP)
 
     def _update_inspector(self):
+        selected_items = self._selected_items()
+        if len(selected_items) > 1:
+            summary = self._selection_summary()
+            lines = [
+                f'Selected rows: {len(selected_items)}',
+                f'Groups: {summary[KIND_GROUP]}',
+                f'Overviews: {summary[KIND_OVERVIEW]}',
+                f'Grids: {summary[KIND_GRID]}',
+                '',
+                'Use the right-click menu for batch actions such as group assignment, bulk enable/disable, bulk lock/unlock, and batch imaging settings for selected rows.',
+            ]
+            self.placeholder_title.setText('Multiple selection')
+            self.placeholder_body.setText('\n'.join(lines))
+            self.inspector_stack.setCurrentWidget(self.page_placeholder)
+            return
         current = self._selected_item()
         if current is None:
             self.placeholder_title.setText('Selection')
@@ -735,7 +1113,12 @@ class AcquisitionManagerDlg(QDialog):
         self.ov_group_label.setText(
             self.acq_groups.overview_group_path_text(ov_index))
         self.ov_status_label.setText(
-            self._status_text(overview.active, overview.locked, overview.acquired))
+            self._status_text(
+                overview.active,
+                overview.locked,
+                overview.acquired,
+                overview.last_acquisition_result,
+                False))
         self.ov_last_result_label.setText(
             overview.last_acquisition_result or 'not_imaged')
         self.ov_last_timestamp_label.setText(
@@ -762,7 +1145,12 @@ class AcquisitionManagerDlg(QDialog):
         self.grid_title.setText(grid.get_label(grid_index))
         self.grid_group_label.setText(self.acq_groups.grid_group_path_text(grid_index))
         self.grid_status_label.setText(
-            self._status_text(grid.active, grid.locked, grid.acquired))
+            self._status_text(
+                grid.active,
+                grid.locked,
+                grid.acquired,
+                grid.last_acquisition_result,
+                grid.is_deferred_polygon_roi()))
         self.grid_last_result_label.setText(
             grid.last_acquisition_result or 'not_imaged')
         self.grid_last_timestamp_label.setText(
@@ -805,13 +1193,17 @@ class AcquisitionManagerDlg(QDialog):
                          'references follow the active tiles in this grid.')
             self.tile_map_note.setText(note)
 
-    def _status_text(self, active, locked, acquired):
-        return (
-            ('active' if active else 'inactive')
-            + ', '
-            + ('locked' if locked else 'unlocked')
-            + ', '
-            + ('acquired' if acquired else 'not acquired'))
+    def _status_text(self, active, locked, acquired, result_text, deferred):
+        parts = [
+            'active' if active else 'inactive',
+            'locked' if locked else 'unlocked',
+            'acquired' if acquired else 'not acquired',
+        ]
+        if self._result_failed(result_text):
+            parts.append('failed')
+        if deferred:
+            parts.append('deferred')
+        return ', '.join(parts)
 
     def _interval_text(self, interval, offset):
         return f'every {interval} slice(s), offset {offset}'
@@ -839,6 +1231,358 @@ class AcquisitionManagerDlg(QDialog):
         if current is None or current.data(0, ROLE_KIND) != KIND_GRID:
             return None
         return current.data(0, ROLE_IDENTIFIER)
+
+    def _selected_target_indices(self):
+        overview_indices = set()
+        grid_indices = set()
+        for kind, identifier in self._selected_kind_identifier_pairs():
+            if kind == KIND_GROUP:
+                overview_indices.update(
+                    self.acq_groups.grouped_overview_indices(identifier))
+                grid_indices.update(
+                    self.acq_groups.grouped_grid_indices(identifier))
+            elif kind == KIND_OVERVIEW:
+                overview_indices.add(identifier)
+            elif kind == KIND_GRID:
+                grid_indices.add(identifier)
+        return sorted(overview_indices), sorted(grid_indices)
+
+    def _overview_imaging_state(self, ov_index):
+        ov = self.ovm[ov_index]
+        return {
+            'frame_size_selector': int(ov.frame_size_selector),
+            'pixel_size': float(ov.pixel_size),
+            'dwell_time_selector': int(ov.dwell_time_selector),
+            'bit_depth_selector': int(ov.bit_depth_selector),
+            'acq_interval': int(ov.acq_interval),
+            'acq_interval_offset': int(ov.acq_interval_offset),
+        }
+
+    def _grid_imaging_state(self, grid_index):
+        grid = self.gm[grid_index]
+        return {
+            'frame_size_selector': int(grid.frame_size_selector),
+            'pixel_size': float(grid.pixel_size),
+            'dwell_time_selector': int(grid.dwell_time_selector),
+            'bit_depth_selector': int(grid.bit_depth_selector),
+            'acq_interval': int(grid.acq_interval),
+            'acq_interval_offset': int(grid.acq_interval_offset),
+            'overlap': int(grid.overlap),
+            'row_shift': int(grid.row_shift),
+        }
+
+    def _toggle_selected_rows_active(self, active):
+        overview_indices, grid_indices = self._selected_target_indices()
+        if not overview_indices and not grid_indices:
+            return
+        for ov_index in overview_indices:
+            self.ovm[ov_index].active = bool(active)
+        for grid_index in grid_indices:
+            self.gm[grid_index].active = bool(active)
+        self.viewport._notify_acquisition_manager_state_change(
+            update_debris=True)
+
+    def _toggle_selected_rows_lock(self, locked):
+        overview_indices, grid_indices = self._selected_target_indices()
+        if not overview_indices and not grid_indices:
+            return
+        if not locked:
+            locked_items = [
+                f'OV {ov_index}' for ov_index in overview_indices
+                if self.ovm[ov_index].locked
+            ] + [
+                self.gm[grid_index].get_label(grid_index)
+                for grid_index in grid_indices
+                if self.gm[grid_index].locked
+            ]
+            if locked_items:
+                response = QMessageBox.question(
+                    self,
+                    'Unlock selected items',
+                    'Unlocking acquired items allows moving them and may '
+                    'break spatial provenance.\n\nProceed?',
+                    QMessageBox.Ok | QMessageBox.Cancel)
+                if response != QMessageBox.Ok:
+                    return
+        for ov_index in overview_indices:
+            self.ovm[ov_index].locked = bool(locked)
+        for grid_index in grid_indices:
+            self.gm[grid_index].locked = bool(locked)
+        self.viewport._notify_acquisition_manager_state_change(
+            update_debris=False)
+
+    def _batch_target_indices_for_group(self, group_id, kind):
+        if kind == KIND_OVERVIEW:
+            return self.acq_groups.grouped_overview_indices(group_id)
+        return self.acq_groups.grouped_grid_indices(group_id)
+
+    def _validate_grid_batch_changes(self, target_indices, changes):
+        for grid_index in target_indices:
+            grid = self.gm[grid_index]
+            frame_size_selector = changes.get(
+                'frame_size_selector', grid.frame_size_selector)
+            frame_size = self.viewport.sem.STORE_RES[frame_size_selector]
+            tile_width_p = frame_size[0]
+            overlap = changes.get('overlap', grid.overlap)
+            row_shift = changes.get('row_shift', grid.row_shift)
+            if not (-0.3 * tile_width_p <= overlap < 0.3 * tile_width_p):
+                return ('Overlap outside of allowed range '
+                        '(-30% .. 30% frame width).')
+            if not (0 <= row_shift <= tile_width_p):
+                return ('Row shift outside of allowed range '
+                        '(0 .. frame width).')
+        return ''
+
+    def _open_batch_settings_for_targets(self, kind, target_indices, target_label):
+        if not target_indices:
+            return
+        if kind == KIND_OVERVIEW:
+            source_values = self._overview_imaging_state(target_indices[0])
+        else:
+            source_values = self._grid_imaging_state(target_indices[0])
+        dialog = BatchImagingSettingsDlg(
+            kind, self.viewport.sem, source_values, target_label, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        changes = dialog.selected_values()
+        if not changes:
+            return
+        if kind == KIND_GRID:
+            error_msg = self._validate_grid_batch_changes(
+                target_indices, changes)
+            if error_msg:
+                QMessageBox.warning(self, 'Error', error_msg, QMessageBox.Ok)
+                return
+        if kind == KIND_OVERVIEW:
+            for ov_index in target_indices:
+                self._apply_overview_imaging_settings(ov_index, changes)
+            self.viewport._notify_acquisition_manager_state_change(
+                update_debris=False)
+        else:
+            for grid_index in target_indices:
+                self._apply_grid_imaging_settings(grid_index, changes)
+            self.viewport._notify_acquisition_manager_state_change(
+                update_debris=True)
+
+    def _open_batch_settings_for_selected(self, kind):
+        target_indices = self._selected_indices(kind)
+        if not target_indices:
+            return
+        label = f'{len(target_indices)} selected {"overview" if kind == KIND_OVERVIEW else "grid"} row(s)'
+        self._open_batch_settings_for_targets(kind, target_indices, label)
+
+    def _open_batch_settings_for_group(self, group_id, kind):
+        target_indices = self._batch_target_indices_for_group(group_id, kind)
+        if not target_indices:
+            QMessageBox.information(
+                self,
+                'No matching items in group',
+                'The selected group does not contain any matching items for batch imaging settings.',
+                QMessageBox.Ok)
+            return
+        group_name = self.acq_groups.group_path_text(group_id)
+        label = f'"{group_name}" ({len(target_indices)} {"overview" if kind == KIND_OVERVIEW else "grid"} row(s))'
+        self._open_batch_settings_for_targets(kind, target_indices, label)
+
+    def _apply_overview_imaging_settings(self, ov_index, payload):
+        ov = self.ovm[ov_index]
+        ov.frame_size_selector = payload.get(
+            'frame_size_selector', ov.frame_size_selector)
+        ov.pixel_size = payload.get('pixel_size', ov.pixel_size)
+        ov.dwell_time_selector = payload.get(
+            'dwell_time_selector', ov.dwell_time_selector)
+        ov.bit_depth_selector = payload.get(
+            'bit_depth_selector', ov.bit_depth_selector)
+        ov.acq_interval = payload.get('acq_interval', ov.acq_interval)
+        ov.acq_interval_offset = payload.get(
+            'acq_interval_offset', ov.acq_interval_offset)
+
+    def _apply_grid_imaging_settings(self, grid_index, payload):
+        grid = self.gm[grid_index]
+        frame_size_selector = payload.get(
+            'frame_size_selector', grid.frame_size_selector)
+        pixel_size = payload.get('pixel_size', grid.pixel_size)
+        overlap = payload.get('overlap', grid.overlap)
+        row_shift = payload.get('row_shift', grid.row_shift)
+        frame_size = self.viewport.sem.STORE_RES[frame_size_selector]
+        geometry_changed = any([
+            frame_size_selector != grid.frame_size_selector,
+            overlap != grid.overlap,
+            row_shift != grid.row_shift,
+            pixel_size != grid.pixel_size,
+        ])
+        preserve_rectangular_footprint = (
+            geometry_changed and not grid.has_polygon_roi())
+        rectangular_layout = None
+        polygon_top_left_dx_dy = None
+        if grid.has_polygon_roi():
+            polygon_top_left_dx_dy = (
+                grid.origin_dx_dy[0] - grid.tile_width_d() / 2,
+                grid.origin_dx_dy[1] - grid.tile_height_d() / 2)
+        elif preserve_rectangular_footprint:
+            if (not isinstance(grid.sw_sh, (list, tuple))
+                    or len(grid.sw_sh) < 2
+                    or grid.sw_sh[0] <= 0
+                    or grid.sw_sh[1] <= 0):
+                grid.sw_sh = [float(grid.width_d()), float(grid.height_d())]
+            rectangular_layout = self.gm.polygon_layout_summary(
+                float(grid.sw_sh[0]),
+                float(grid.sw_sh[1]),
+                frame_size,
+                pixel_size,
+                overlap,
+                row_shift)
+        prev_grid_centre = np.array(grid.centre_sx_sy)
+        grid.auto_update_tile_positions = False
+        if preserve_rectangular_footprint and rectangular_layout is not None:
+            grid.size = [
+                rectangular_layout['rows'],
+                rectangular_layout['cols']]
+        grid.frame_size_selector = frame_size_selector
+        grid.overlap = overlap
+        grid.row_shift = row_shift
+        grid.pixel_size = pixel_size
+        grid.dwell_time_selector = payload.get(
+            'dwell_time_selector', grid.dwell_time_selector)
+        grid.bit_depth_selector = payload.get(
+            'bit_depth_selector', grid.bit_depth_selector)
+        grid.acq_interval = payload.get('acq_interval', grid.acq_interval)
+        grid.acq_interval_offset = payload.get(
+            'acq_interval_offset', grid.acq_interval_offset)
+        if grid.has_polygon_roi():
+            if grid.is_deferred_polygon_roi():
+                self.gm.update_deferred_polygon_grid(
+                    grid_index, top_left_dx_dy=polygon_top_left_dx_dy)
+            else:
+                self.gm.refresh_polygon_grid(
+                    grid_index, top_left_dx_dy=polygon_top_left_dx_dy)
+        else:
+            grid.update_tile_positions()
+            grid.centre_sx_sy = prev_grid_centre
+            if preserve_rectangular_footprint:
+                grid.sw_sh = [float(grid.sw_sh[0]), float(grid.sw_sh[1])]
+            else:
+                grid.sw_sh = [float(grid.width_d()), float(grid.height_d())]
+        grid.auto_update_tile_positions = True
+
+    def _open_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.tree.clearSelection()
+            item.setSelected(True)
+            self.tree.setCurrentItem(item)
+        kind = item.data(0, ROLE_KIND)
+        identifier = item.data(0, ROLE_IDENTIFIER)
+        summary = self._selection_summary()
+        overview_indices, grid_indices = self._selected_target_indices()
+        selected_rows_total = summary[KIND_OVERVIEW] + summary[KIND_GRID]
+        single_overview_selection = summary[KIND_OVERVIEW] == 1 and selected_rows_total == 1
+        single_grid_selection = summary[KIND_GRID] == 1 and selected_rows_total == 1
+        multi_overview_selection = summary[KIND_OVERVIEW] > 1 and selected_rows_total == summary[KIND_OVERVIEW]
+        multi_grid_selection = summary[KIND_GRID] > 1 and selected_rows_total == summary[KIND_GRID]
+        editable = self._is_mutating_enabled()
+        menu = QMenu(self)
+
+        if overview_indices or grid_indices:
+            action_enable_selected = menu.addAction('Enable selected rows')
+            action_enable_selected.triggered.connect(
+                lambda: self._toggle_selected_rows_active(True))
+            action_disable_selected = menu.addAction('Disable selected rows')
+            action_disable_selected.triggered.connect(
+                lambda: self._toggle_selected_rows_active(False))
+            action_lock_selected = menu.addAction('Lock selected rows')
+            action_lock_selected.triggered.connect(
+                lambda: self._toggle_selected_rows_lock(True))
+            action_unlock_selected = menu.addAction('Unlock selected rows')
+            action_unlock_selected.triggered.connect(
+                lambda: self._toggle_selected_rows_lock(False))
+            action_enable_selected.setEnabled(editable)
+            action_disable_selected.setEnabled(editable)
+            action_lock_selected.setEnabled(editable)
+            action_unlock_selected.setEnabled(editable)
+            menu.addSeparator()
+
+        if kind == KIND_GROUP:
+            action_new_subgroup = menu.addAction('New subgroup')
+            action_new_subgroup.triggered.connect(self._create_subgroup)
+            action_delete_group = menu.addAction('Delete group')
+            action_delete_group.triggered.connect(self._delete_selected_group)
+            action_new_subgroup.setEnabled(editable)
+            action_delete_group.setEnabled(editable)
+            group_overviews = self.acq_groups.grouped_overview_indices(identifier)
+            group_grids = self.acq_groups.grouped_grid_indices(identifier)
+            if group_overviews or group_grids:
+                menu.addSeparator()
+                if group_overviews:
+                    action_batch_ov = menu.addAction(
+                        'Batch overview settings for this group...')
+                    action_batch_ov.triggered.connect(
+                        lambda _, group_id=identifier:
+                            self._open_batch_settings_for_group(
+                                group_id, KIND_OVERVIEW))
+                    action_batch_ov.setEnabled(editable)
+                if group_grids:
+                    action_batch_grid = menu.addAction(
+                        'Batch grid settings for this group...')
+                    action_batch_grid.triggered.connect(
+                        lambda _, group_id=identifier:
+                            self._open_batch_settings_for_group(
+                                group_id, KIND_GRID))
+                    action_batch_grid.setEnabled(editable)
+        elif kind == KIND_OVERVIEW:
+            if single_overview_selection:
+                action_open = menu.addAction('Open settings')
+                action_open.triggered.connect(
+                    self._open_selected_overview_settings)
+                action_copy = menu.addAction('Copy OV')
+                action_copy.triggered.connect(self._copy_selected_overview_row)
+                action_duplicate = menu.addAction('Duplicate OV')
+                action_duplicate.triggered.connect(
+                    self._duplicate_selected_overview_row)
+                action_delete = menu.addAction('Delete OV')
+                action_delete.triggered.connect(self._delete_selected_overview)
+                action_open.setEnabled(editable)
+                action_copy.setEnabled(editable)
+                action_duplicate.setEnabled(editable)
+                action_delete.setEnabled(editable)
+                if identifier == 0 or identifier != self.ovm.number_ov - 1:
+                    action_delete.setEnabled(False)
+                menu.addSeparator()
+            if single_overview_selection or multi_overview_selection:
+                action_batch_overviews = menu.addAction(
+                    'Batch overview settings for selected rows...')
+                action_batch_overviews.triggered.connect(
+                    lambda: self._open_batch_settings_for_selected(
+                        KIND_OVERVIEW))
+                action_batch_overviews.setEnabled(editable)
+        elif kind == KIND_GRID:
+            if single_grid_selection:
+                action_open = menu.addAction('Open settings')
+                action_open.triggered.connect(self._open_selected_grid_settings)
+                action_copy = menu.addAction('Copy grid')
+                action_copy.triggered.connect(self._copy_selected_grid_row)
+                action_duplicate = menu.addAction('Duplicate grid')
+                action_duplicate.triggered.connect(
+                    self._duplicate_selected_grid_row)
+                action_delete = menu.addAction('Delete grid')
+                action_delete.triggered.connect(self._delete_selected_grid)
+                action_open.setEnabled(editable)
+                action_copy.setEnabled(editable)
+                action_duplicate.setEnabled(editable)
+                action_delete.setEnabled(editable)
+                if identifier != self.gm.number_grids - 1:
+                    action_delete.setEnabled(False)
+                menu.addSeparator()
+            if single_grid_selection or multi_grid_selection:
+                action_batch_grids = menu.addAction(
+                    'Batch grid settings for selected rows...')
+                action_batch_grids.triggered.connect(
+                    lambda: self._open_batch_settings_for_selected(
+                        KIND_GRID))
+                action_batch_grids.setEnabled(editable)
+        menu.exec_(self.tree.viewport().mapToGlobal(pos))
 
     def _create_group(self):
         if not self._is_mutating_enabled():
@@ -910,6 +1654,50 @@ class AcquisitionManagerDlg(QDialog):
         if grid_index is not None:
             self.viewport.main_controls_trigger.transmit(
                 'OPEN GRID SETTINGS', grid_index)
+
+    def _copy_selected_overview_row(self):
+        ov_index = self._selected_overview_index()
+        if ov_index is None:
+            return
+        previous_ov = self.viewport.selected_ov
+        self.viewport.selected_ov = ov_index
+        try:
+            self.viewport._vp_copy_selected_ov()
+        finally:
+            self.viewport.selected_ov = previous_ov
+
+    def _duplicate_selected_overview_row(self):
+        ov_index = self._selected_overview_index()
+        if ov_index is None:
+            return
+        previous_ov = self.viewport.selected_ov
+        self.viewport.selected_ov = ov_index
+        try:
+            self.viewport._vp_duplicate_selected_ov()
+        finally:
+            self.viewport.selected_ov = previous_ov
+
+    def _copy_selected_grid_row(self):
+        grid_index = self._selected_grid_index()
+        if grid_index is None:
+            return
+        previous_grid = self.viewport.selected_grid
+        self.viewport.selected_grid = grid_index
+        try:
+            self.viewport._vp_copy_selected_grid()
+        finally:
+            self.viewport.selected_grid = previous_grid
+
+    def _duplicate_selected_grid_row(self):
+        grid_index = self._selected_grid_index()
+        if grid_index is None:
+            return
+        previous_grid = self.viewport.selected_grid
+        self.viewport.selected_grid = grid_index
+        try:
+            self.viewport._vp_duplicate_selected_grid()
+        finally:
+            self.viewport.selected_grid = previous_grid
 
     def _acquire_selected_overview(self):
         ov_index = self._selected_overview_index()

@@ -26,7 +26,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # deleted from the default configuration files
 CFG_TEMPLATE_FILE = os.path.join(BASE_DIR, "default_cfg", "default.ini")
 CFG_NUMBER_SECTIONS = 13
-CFG_NUMBER_KEYS = 295
+CFG_NUMBER_KEYS = 300
 
 #SYSCFG_TEMPLATE_FILE = 'src/default_cfg/system.cfg'  # Template of system configuration
 SYSCFG_TEMPLATE_FILE = os.path.join(BASE_DIR, "default_cfg", "system.cfg")

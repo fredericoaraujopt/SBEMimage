@@ -10,7 +10,6 @@ import re
 from qtpy.QtCore import QObject, QEvent, Qt, QTimer
 from qtpy.QtWidgets import (
     QAbstractSpinBox,
-    QApplication,
     QCheckBox,
     QComboBox,
     QDateTimeEdit,

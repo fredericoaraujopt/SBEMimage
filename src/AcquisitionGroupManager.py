@@ -7,6 +7,13 @@ class AcquisitionGroupManager:
     """Own acquisition-manager hierarchy, assignments, and effective colours."""
 
     SECTION = 'acquisition_manager'
+    UI_DEFAULTS = {
+        'ui_view_preset': 'All items',
+        'ui_filter_active_only': 'False',
+        'ui_filter_locked_only': 'False',
+        'ui_filter_failed_only': 'False',
+        'ui_filter_current_group_only': 'False',
+    }
 
     def __init__(self, cfg, grid_manager, overview_manager):
         self.cfg = cfg
@@ -90,9 +97,13 @@ class AcquisitionGroupManager:
         self._normalize_all_sort_indices()
 
     def _would_create_cycle(self, group_id, parent_id):
+        visited = set()
         while parent_id is not None:
             if parent_id == group_id:
                 return True
+            if parent_id in visited:
+                return True
+            visited.add(parent_id)
             node = self._group_nodes.get(parent_id)
             if node is None:
                 return False
@@ -413,3 +424,43 @@ class AcquisitionGroupManager:
         self.cfg[self.SECTION]['group_nodes'] = json.dumps(self.groups())
         self.cfg[self.SECTION]['grid_group_ids'] = json.dumps(self._grid_group_ids)
         self.cfg[self.SECTION]['ov_group_ids'] = json.dumps(self._ov_group_ids)
+
+    def load_ui_state(self):
+        section = self.cfg[self.SECTION]
+        return {
+            'view_preset': section.get(
+                'ui_view_preset', self.UI_DEFAULTS['ui_view_preset']),
+            'filter_active_only': (
+                section.get(
+                    'ui_filter_active_only',
+                    self.UI_DEFAULTS['ui_filter_active_only']).lower()
+                == 'true'),
+            'filter_locked_only': (
+                section.get(
+                    'ui_filter_locked_only',
+                    self.UI_DEFAULTS['ui_filter_locked_only']).lower()
+                == 'true'),
+            'filter_failed_only': (
+                section.get(
+                    'ui_filter_failed_only',
+                    self.UI_DEFAULTS['ui_filter_failed_only']).lower()
+                == 'true'),
+            'filter_current_group_only': (
+                section.get(
+                    'ui_filter_current_group_only',
+                    self.UI_DEFAULTS['ui_filter_current_group_only']).lower()
+                == 'true'),
+        }
+
+    def save_ui_state(self, state):
+        section = self.cfg[self.SECTION]
+        section['ui_view_preset'] = str(
+            state.get('view_preset', self.UI_DEFAULTS['ui_view_preset']))
+        section['ui_filter_active_only'] = str(bool(
+            state.get('filter_active_only', False)))
+        section['ui_filter_locked_only'] = str(bool(
+            state.get('filter_locked_only', False)))
+        section['ui_filter_failed_only'] = str(bool(
+            state.get('filter_failed_only', False)))
+        section['ui_filter_current_group_only'] = str(bool(
+            state.get('filter_current_group_only', False)))
