@@ -1520,7 +1520,7 @@ class Acquisition:
         self.heuristic_af_queue = []
         remaining_cutting_time = self.microtome.full_cut_duration - time_elapsed
         # only wait if not GCIB removal
-        if (self.syscfg['device']['microtome'] != '6') and remaining_cutting_time > 0:
+        if (self.syscfg['device']['microtome'] != 'GCIB') and remaining_cutting_time > 0:
             sleep(remaining_cutting_time)
 
     def acquire_all_overviews(self):
@@ -1799,7 +1799,7 @@ class Acquisition:
                     # OV has passed all tests, but now check for debris
                     ov_accepted = True
                     # do not check if using GCIB
-                    if self.first_ov[ov_index] and not self.syscfg['device']['microtome'] == '6':
+                    if self.first_ov[ov_index] and self.syscfg['device']['microtome'] != 'GCIB':
                         self.main_controls_trigger.transmit(
                             'ASK DEBRIS FIRST OV', ov_index)
                         # The command above causes a message box to be displayed

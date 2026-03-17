@@ -329,7 +329,7 @@ class MainControls(QMainWindow):
                                self.img_inspector, self.autofocus, 
                                self.notifications, self.tcp_remote, self.trigger)
         # enable pause while milling
-        if self.use_microtome and (self.syscfg['device']['microtome'] == '6'):
+        if self.use_microtome and (self.syscfg['device']['microtome'] == 'GCIB'):
             self.microtome.acq = self.acq
         # Check if plasma cleaner is installed and load its COM port.
         self.cfg['sys']['plc_installed'] = self.syscfg['plc']['installed']
@@ -380,10 +380,10 @@ class MainControls(QMainWindow):
         self.show_stack_acq_estimates()
 
         # Restrict GUI (microtome-specific functionality) if no microtome used
-        if not self.use_microtome or self.syscfg['device']['microtome'] == '6':
+        if not self.use_microtome or self.syscfg['device']['microtome'] == 'GCIB':
             self.restrict_gui_for_sem_stage()
 
-        if self.syscfg['device']['microtome'] != '6':
+        if self.syscfg['device']['microtome'] != 'GCIB':
             self.restrict_gui_wo_gcib()
 
         # Now show main window:
@@ -3033,10 +3033,10 @@ class MainControls(QMainWindow):
         # Disable/enable menu
         self.menubar.setEnabled(idle)
         # Restrict GUI (microtome-specific functionality) if no microtome used
-        if not self.use_microtome or self.syscfg['device']['microtome'] == '6':
+        if not self.use_microtome or self.syscfg['device']['microtome'] == 'GCIB':
             self.restrict_gui_for_sem_stage()
 
-        if self.syscfg['device']['microtome'] != '6':
+        if self.syscfg['device']['microtome'] != 'GCIB':
             self.restrict_gui_wo_gcib()
 
     def restrict_focus_tool_gui(self, busy):
