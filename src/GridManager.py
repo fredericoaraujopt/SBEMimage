@@ -636,6 +636,7 @@ class GridManager(list):
             wd_gradient_params=grid.wd_gradient_params,
             size=[layout['rows'], layout['cols']],
         )
+        return self.number_grids - 1
 
     def estimate_polygon_layout(self, grid):
         return self.estimate_polygon_layout_for_parameters(

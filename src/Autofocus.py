@@ -207,9 +207,9 @@ class Autofocus:
 
     def current_slice_active(self, slice_counter):
         autofocus_active, autostig_active = False, False
-        if slice_counter > 0:
+        if slice_counter >= 0:
             autofocus_active = (slice_counter % self.interval == 0)
-        if -1 < self.autostig_delay < slice_counter:
+        if -1 < self.autostig_delay <= slice_counter:
             autostig_active = ((
                 (slice_counter - self.autostig_delay) % self.interval) == 0)
         return autofocus_active, autostig_active

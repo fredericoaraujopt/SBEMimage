@@ -208,23 +208,51 @@ class Grid(list):
             self.sw_sh[0],
             self.sw_sh[1])
 
+    def local_to_global_d(self, local_point):
+        origin_dx, origin_dy = self.origin_dx_dy
+        pivot_offset_x = self.tile_width_d() / 2
+        pivot_offset_y = self.tile_height_d() / 2
+        rel_x = float(local_point[0]) - pivot_offset_x
+        rel_y = float(local_point[1]) - pivot_offset_y
+        theta = radians(self.rotation)
+        if theta != 0:
+            rot_x = rel_x * cos(theta) - rel_y * sin(theta)
+            rot_y = rel_x * sin(theta) + rel_y * cos(theta)
+            rel_x, rel_y = rot_x, rot_y
+        return np.array([origin_dx + rel_x, origin_dy + rel_y], dtype=float)
+
+    def rectangular_roi_top_left_dx_dy(self):
+        return self.local_to_global_d((0, 0))
+
+    def rectangular_roi_centre_dx_dy(self):
+        return self.local_to_global_d((self.sw_sh[0] / 2, self.sw_sh[1] / 2))
+
+    def set_rectangular_roi_top_left_dx_dy(self, top_left_dx_dy):
+        theta = radians(self.rotation)
+        offset_x = self.tile_width_d() / 2
+        offset_y = self.tile_height_d() / 2
+        if theta != 0:
+            rot_x = offset_x * cos(theta) - offset_y * sin(theta)
+            rot_y = offset_x * sin(theta) + offset_y * cos(theta)
+            offset_x, offset_y = rot_x, rot_y
+        self.origin_dx_dy = (
+            float(top_left_dx_dy[0]) + offset_x,
+            float(top_left_dx_dy[1]) + offset_y)
+
+    def set_rectangular_roi_centre_dx_dy(self, centre_dx_dy):
+        top_left_dx_dy = (
+            float(centre_dx_dy[0]) - self.sw_sh[0] / 2,
+            float(centre_dx_dy[1]) - self.sw_sh[1] / 2)
+        self.set_rectangular_roi_top_left_dx_dy(top_left_dx_dy)
+
     def roi_global_points_d(self):
         local_points = self.roi_local_points_d()
         if len(local_points) < 3:
             return []
-        origin_dx, origin_dy = self.origin_dx_dy
-        pivot_offset_x = self.tile_width_d() / 2
-        pivot_offset_y = self.tile_height_d() / 2
-        theta = radians(self.rotation)
         global_points = []
         for local_x, local_y in local_points:
-            rel_x = local_x - pivot_offset_x
-            rel_y = local_y - pivot_offset_y
-            if theta != 0:
-                rot_x = rel_x * cos(theta) - rel_y * sin(theta)
-                rot_y = rel_x * sin(theta) + rel_y * cos(theta)
-                rel_x, rel_y = rot_x, rot_y
-            global_points.append([origin_dx + rel_x, origin_dy + rel_y])
+            point = self.local_to_global_d((local_x, local_y))
+            global_points.append([point[0], point[1]])
         return global_points
 
     def initialize_tiles(self):

@@ -136,6 +136,7 @@ class Viewport(QWidget):
         self._vp_grid_acq_in_progress = False
         self._vp_grid_acq_index = None
         self._vp_acq_state_backup = None
+        self._vp_first_created_grid_settings_shown = False
         self.render_debug_enabled = utils.str_to_bool(
             self.cfg['viewport'].get('render_debug', 'False'))
         self.render_antialias = utils.str_to_bool(
@@ -1414,9 +1415,11 @@ class Viewport(QWidget):
                         self._vp_create_deferred_rectangle_roi(
                             (x0, y0), (w, h), layout)
                     elif creation_mode == 'materialize':
-                        self.gm.draw_grid(x0, y0, w, h)
+                        grid_index = self.gm.draw_grid(x0, y0, w, h)
                         self.main_controls_trigger.transmit(
                             'GRID SETTINGS CHANGED')
+                        self._vp_maybe_open_first_created_grid_settings(
+                            grid_index)
 
             if self.ov_draw_active:
                 if h != 0 and w != 0:
@@ -1682,6 +1685,7 @@ class Viewport(QWidget):
         self.vp_current_grid = grid_index
         self.vp_update_grid_selector()
         self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+        self._vp_maybe_open_first_created_grid_settings(grid_index)
         self._add_to_main_log(
             f'CTRL: Created deferred ROI placeholder for '
             f'{self.gm.get_grid_label(grid_index)} '
@@ -1706,6 +1710,7 @@ class Viewport(QWidget):
         self.vp_current_grid = grid_index
         self.vp_update_grid_selector()
         self.main_controls_trigger.transmit('GRID SETTINGS CHANGED')
+        self._vp_maybe_open_first_created_grid_settings(grid_index)
         if creation_mode == 'defer':
             self._add_to_main_log(
                 f'CTRL: Created deferred ROI placeholder for '
@@ -1713,6 +1718,17 @@ class Viewport(QWidget):
                 f'({layout["tile_count"]:,} estimated tiles).')
         self._vp_disarm_polygon_tool()
         self.vp_draw()
+
+    def _vp_maybe_open_first_created_grid_settings(self, grid_index):
+        if self._vp_first_created_grid_settings_shown:
+            return
+        if grid_index is None or not (0 <= grid_index < self.gm.number_grids):
+            return
+        self._vp_first_created_grid_settings_shown = True
+        QTimer.singleShot(
+            0,
+            lambda index=grid_index: self.main_controls_trigger.transmit(
+                'OPEN GRID SETTINGS', index))
 
     def _vp_place_shape_from_tool(self, centre_dx_dy):
         if self.vp_polygon_tool_spec is None:

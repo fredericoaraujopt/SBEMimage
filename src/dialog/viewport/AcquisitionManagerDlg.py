@@ -740,6 +740,12 @@ class AcquisitionManagerDlg(QDialog):
         return True
 
     def _group_has_visible_content(self, group_id, visited=None):
+        if not self._filters_active():
+            return True
+        current_group_id = self._current_filter_group_id()
+        if (self.checkBox_filterCurrentGroup.isChecked()
+                and group_id == current_group_id):
+            return True
         if visited is None:
             visited = set()
         if group_id in visited:
@@ -858,11 +864,15 @@ class AcquisitionManagerDlg(QDialog):
             self.tree.expandItem(group_item)
         return True
 
-    def refresh_view(self, selected_key=None):
+    def refresh_view(self, selected_key=None, filter_group_id_override=None):
         self.acq_groups.sync_inventory()
         if selected_key is None:
             selected_key = self._selected_item_key()
-        current_group_id = self._current_filter_group_id()
+        if (self.checkBox_filterCurrentGroup.isChecked()
+                and filter_group_id_override is not None):
+            current_group_id = filter_group_id_override
+        else:
+            current_group_id = self._current_filter_group_id()
         if self._tree_reorder_enabled():
             self.tree.setDragDropMode(QAbstractItemView.InternalMove)
         else:
@@ -1208,11 +1218,14 @@ class AcquisitionManagerDlg(QDialog):
     def _interval_text(self, interval, offset):
         return f'every {interval} slice(s), offset {offset}'
 
-    def _broadcast_group_change(self, update_debris=False, selected_key=None):
+    def _broadcast_group_change(self, update_debris=False, selected_key=None,
+                                filter_group_id_override=None):
         self.viewport._notify_acquisition_manager_state_change(
             update_debris=update_debris)
         if selected_key is not None:
-            self.refresh_view(selected_key=selected_key)
+            self.refresh_view(
+                selected_key=selected_key,
+                filter_group_id_override=filter_group_id_override)
 
     def _current_group_id(self):
         current = self._selected_item()
@@ -1588,9 +1601,13 @@ class AcquisitionManagerDlg(QDialog):
         if not self._is_mutating_enabled():
             return
         group_id = self.acq_groups.create_group()
+        filter_group_id_override = None
+        if self.checkBox_filterCurrentGroup.isChecked():
+            filter_group_id_override = group_id
         self._broadcast_group_change(
             update_debris=False,
-            selected_key=self._item_key(KIND_GROUP, group_id))
+            selected_key=self._item_key(KIND_GROUP, group_id),
+            filter_group_id_override=filter_group_id_override)
 
     def _create_subgroup(self):
         if not self._is_mutating_enabled():

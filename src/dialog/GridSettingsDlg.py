@@ -424,6 +424,8 @@ class GridSettingsDlg(QDialog):
         polygon_save_mode = 'materialize'
         preserve_rectangular_footprint = False
         rectangular_layout = None
+        prev_rectangular_top_left_dx_dy = None
+        prev_rectangular_centre_dx_dy = None
         frame_size_selector = self.comboBox_tileSize.currentIndex()
         input_overlap = self.spinBox_overlap.value()
         input_shift = self.spinBox_shift.value()
@@ -455,12 +457,12 @@ class GridSettingsDlg(QDialog):
                     pixel_size,
                     input_overlap,
                     input_shift)
+                prev_rectangular_top_left_dx_dy = np.array(
+                    grid.rectangular_roi_top_left_dx_dy(), dtype=float)
+                prev_rectangular_centre_dx_dy = np.array(
+                    grid.rectangular_roi_centre_dx_dy(), dtype=float)
 
-        if self.magc_mode:
-            # Preserve centre coordinates of MagC grids
-            prev_grid_centre = grid.centre_sx_sy
-        else:
-            prev_grid_centre = np.array(grid.centre_sx_sy)
+        prev_grid_centre = np.array(grid.centre_sx_sy)
 
         tile_width_p = frame_size[0]
         if -0.3 * tile_width_p <= input_overlap < 0.3 * tile_width_p:
@@ -537,32 +539,44 @@ class GridSettingsDlg(QDialog):
                     top_left_dx_dy=polygon_top_left_dx_dy)
         else:
             grid.update_tile_positions()
-            grid.centre_sx_sy = prev_grid_centre
             if preserve_rectangular_footprint:
+                grid.set_rectangular_roi_top_left_dx_dy(
+                    prev_rectangular_top_left_dx_dy)
+                grid.update_tile_positions()
                 grid.sw_sh = [float(grid.sw_sh[0]), float(grid.sw_sh[1])]
             else:
+                grid.centre_sx_sy = prev_grid_centre
                 grid.sw_sh = [float(grid.width_d()), float(grid.height_d())]
 
         # Now apply rotation if the rotation angle was changed.
         new_rotation = self.doubleSpinBox_rotation.value()
         if new_rotation != grid.rotation:
-          # Get current centre of grid
-          centre_dx, centre_dy = grid.centre_dx_dy
-          # Set new angle, perform rotation to get new grid origin, and update tile positions
-          grid.rotation = new_rotation
-          if polygon_grid and polygon_save_mode == 'defer':
-              grid.update_tile_positions()
-          else:
-              grid.rotate_around_grid_centre(centre_dx, centre_dy)
-              grid.update_tile_positions()
-          if polygon_grid and not grid.is_deferred_polygon_roi():
-              grid.active_tiles = (
-                  self.gm.polygon_active_tiles(grid))
+            # Keep the existing ROI centred while applying rotation.
+            centre_dx, centre_dy = grid.centre_dx_dy
+            if (not polygon_grid and preserve_rectangular_footprint
+                    and prev_rectangular_centre_dx_dy is not None):
+                centre_dx, centre_dy = prev_rectangular_centre_dx_dy
+            grid.rotation = new_rotation
+            if polygon_grid and polygon_save_mode == 'defer':
+                grid.update_tile_positions()
+            elif not polygon_grid and preserve_rectangular_footprint:
+                grid.set_rectangular_roi_centre_dx_dy((centre_dx, centre_dy))
+                grid.update_tile_positions()
+            else:
+                grid.rotate_around_grid_centre(centre_dx, centre_dy)
+                grid.update_tile_positions()
+            if polygon_grid and not grid.is_deferred_polygon_roi():
+                grid.active_tiles = (
+                    self.gm.polygon_active_tiles(grid))
 
         grid.auto_update_tile_positions = True
 
         if self.magc_mode:
-            grid.centre_sx_sy = prev_grid_centre
+            if preserve_rectangular_footprint and prev_rectangular_centre_dx_dy is not None:
+                grid.set_rectangular_roi_centre_dx_dy(
+                    prev_rectangular_centre_dx_dy)
+            else:
+                grid.centre_sx_sy = prev_grid_centre
             self.gm.array_write()
         # Restore default behaviour for updating tile positions
         self.show_current_settings()
